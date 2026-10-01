@@ -1,12 +1,12 @@
 # 🎙️ System Output Audio Recorder (Silicon Valley Edition)
 
-このリポジトリではAI生成コードを使用しています。
-
 Windows 11（およびmacOS）の標準出力（スピーカー・ヘッドホンから流れるシステム音声）を高音質で直接キャプチャ・録音し、WAVおよび各種圧縮形式（MP3, AAC, FLAC, OGG, Opus）で保存する次世代デスクトップアプリケーションです。
+
+※このプロジェクトはAI生成コードを使用しています。
 
 ---
 
-## ✨ 主な特徴・すごい機能
+## ✨ 主な特徴
 
 1. **⚡ ゼロ遅延・高音質 WASAPI Loopback 録音 (Windows 11)**
    - 外部仮想オーディオドライバ不要。Windows 11のCoreAudioエンジンから直接ロスレスキャプチャ。
@@ -60,8 +60,6 @@ py -3.12 -m venv .venv
 ---
 
 ## 📐 アーキテクチャ構成
-
-OBS等の既存コードの丸写しを完全に排除し、**Clean Architecture（ヘキサゴナル・アーキテクチャ）**と**Reactive Streams**を採用したオリジナル設計です。
 
 ```text
 default_output_recorder/
