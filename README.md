@@ -1,6 +1,6 @@
-# 🎙️ System Output Audio Recorder (Silicon Valley Edition)
+# 🎙️ System Output Audio Recorder
 
-Windows 11（およびmacOS）の標準出力（スピーカー・ヘッドホンから流れるシステム音声）を高音質で直接キャプチャ・録音し、WAVおよび各種圧縮形式（MP3, AAC, FLAC, OGG, Opus）で保存する次世代デスクトップアプリケーションです。
+Windows 11（およびmacOS）の標準出力（スピーカー・ヘッドホンから流れるシステム音声）を高音質で直接キャプチャ・録音し、WAVおよび各種圧縮形式（MP3, AAC, FLAC, OGG, Opus）で保存するデスクトップアプリケーションです。
 
 ※このプロジェクトはAI生成コードを使用しています。
 
