@@ -230,3 +230,60 @@ def test_recording_uses_device_sample_rate_and_downmixes(tmp_path):
     assert info.samplerate == 44100
     assert info.channels == 2
     assert info.duration > 0.2
+
+
+# --- 4. Marker / duration alignment with the saved file ----------------------------------
+
+def _record(tmp_path, steps, time_shift=True):
+    """Run a mock recording; `steps` is a callable given the engine while recording."""
+    engine = RecordingEngine(driver=MockAudioDriver())
+    stopped = {}
+    try:
+        engine.start_buffering(time_shift_seconds=30)
+        time.sleep(0.5)  # ~0.5s of pre-roll in the ring buffer
+        path = engine.start_recording(RecordingConfig(output_dir=str(tmp_path)), include_time_shift=time_shift)
+        markers = steps(engine)
+        stopped["duration"] = engine.current_recording_duration
+        engine.stop_recording(keep_buffering=False)
+    finally:
+        engine.shutdown()
+    return path, markers, stopped["duration"]
+
+
+def test_marker_offset_includes_time_shift_preroll(tmp_path):
+    def steps(engine):
+        time.sleep(0.3)
+        return [engine.add_marker()]
+
+    path, (marker,), _ = _record(tmp_path, steps)
+    # Marker sits ~0.5s pre-roll + ~0.3s live into the file (old code reported ~0.3s)
+    assert 0.65 <= marker.timestamp <= 0.95
+    assert marker.timestamp <= sf.info(path).duration
+
+
+def test_marker_offset_excludes_pause(tmp_path):
+    def steps(engine):
+        time.sleep(0.2)
+        engine.pause_recording()
+        time.sleep(0.5)
+        engine.resume_recording()
+        time.sleep(0.2)
+        return [engine.add_marker()]
+
+    _, (marker,), _ = _record(tmp_path, steps, time_shift=False)
+    assert 0.3 <= marker.timestamp <= 0.55
+
+
+def test_reported_duration_matches_file_and_has_no_seam_glitch(tmp_path):
+    def steps(engine):
+        time.sleep(0.4)
+        return []
+
+    path, _, duration = _record(tmp_path, steps)
+    data, sr = sf.read(path)
+    assert abs(duration - len(data) / sr) < 0.05
+
+    # The mock emits one continuous sine; a dropped or duplicated chunk at the
+    # pre-roll/live seam would show up as a jump far larger than one sample step.
+    max_step = 2 * np.pi * 440 / sr * 0.5
+    assert np.max(np.abs(np.diff(data[:, 0]))) <= max_step * 1.2

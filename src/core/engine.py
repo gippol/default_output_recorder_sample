@@ -42,9 +42,14 @@ class RecordingEngine:
         self._active_config: Optional[RecordingConfig] = None
         self._markers: List[Marker] = []
         self._start_time: Optional[float] = None
-        self._pause_start_time: Optional[float] = None
-        self._total_paused_duration: float = 0.0
+        # Sample rate of the file being written; positions are derived from frames written
+        self._file_sample_rate: Optional[int] = None
         self._lock = threading.RLock()
+        # Serialises "push to ring buffer + write to file" (audio thread) against
+        # "write pre-roll + switch to RECORDING" (start_recording), so no chunk is lost or
+        # duplicated at the seam. Kept separate from _lock: switch_device() joins the
+        # capture thread while holding _lock, so the audio thread must never wait on it.
+        self._write_lock = threading.Lock()
         self._current_filepath: Optional[str] = None
         # Device the driver is currently capturing from (resolved, never None while capturing)
         self._capture_device: Optional[AudioDeviceInfo] = None
@@ -149,7 +154,6 @@ class RecordingEngine:
             self._rebuild_pipeline(config)
             self._markers.clear()
             self._start_time = time.time()
-            self._total_paused_duration = 0.0
 
             # Generate output filename
             now = datetime.now()
@@ -184,13 +188,17 @@ class RecordingEngine:
                 bitrate_kbps=config.bitrate_kbps
             )
 
-            # 3. Write pre-recorded buffer if enabled (skip anything at a different rate)
-            if include_time_shift and not self.ring_buffer.is_empty:
-                for ch in self.ring_buffer.get_snapshot():
-                    if ch.format.sample_rate == audio_format.sample_rate:
-                        self.file_sink.write_chunk(ch)
+            self._file_sample_rate = audio_format.sample_rate
 
-            self.state_machine.transition_to(RecordingState.RECORDING)
+            # 3. Write pre-recorded buffer if enabled (skip anything at a different rate),
+            #    then go live atomically w.r.t. the audio thread.
+            with self._write_lock:
+                if include_time_shift and not self.ring_buffer.is_empty:
+                    for ch in self.ring_buffer.get_snapshot():
+                        if ch.format.sample_rate == audio_format.sample_rate:
+                            self.file_sink.write_chunk(ch)
+
+                self.state_machine.transition_to(RecordingState.RECORDING)
             self.event_bus.publish(EventType.RECORDING_STARTED, {
                 "filepath": filepath,
                 "config": config,
@@ -204,7 +212,6 @@ class RecordingEngine:
         with self._lock:
             if not self.state_machine.is_recording():
                 return
-            self._pause_start_time = time.time()
             self.state_machine.transition_to(RecordingState.PAUSED)
             self.event_bus.publish(EventType.RECORDING_PAUSED)
 
@@ -213,9 +220,6 @@ class RecordingEngine:
         with self._lock:
             if not self.state_machine.is_paused():
                 return
-            if self._pause_start_time:
-                self._total_paused_duration += (time.time() - self._pause_start_time)
-                self._pause_start_time = None
             self.state_machine.transition_to(RecordingState.RECORDING)
             self.event_bus.publish(EventType.RECORDING_RESUMED)
 
@@ -230,8 +234,8 @@ class RecordingEngine:
 
             self.state_machine.transition_to(RecordingState.FINALIZING)
 
-            final_filepath = self.file_sink.close()
             duration = self.current_recording_duration
+            final_filepath = self.file_sink.close()
             markers_copy = list(self._markers)
 
             if not keep_buffering:
@@ -241,6 +245,7 @@ class RecordingEngine:
                 self.state_machine.transition_to(RecordingState.BUFFERING)
 
             self._start_time = None
+            self._file_sample_rate = None
             self._current_filepath = None
 
             self.event_bus.publish(EventType.RECORDING_STOPPED, final_filepath, duration, markers_copy)
@@ -260,16 +265,17 @@ class RecordingEngine:
 
     @property
     def current_recording_duration(self) -> float:
-        """Elapsed recording time in seconds (excluding pauses)."""
+        """
+        Current position in the output file, in seconds.
+
+        Derived from frames actually written rather than wall-clock time, so it includes
+        the time-shift pre-roll at the start of the file and excludes paused periods.
+        Marker timestamps use this, so they line up with the audio in the saved file.
+        """
         with self._lock:
-            if not self._start_time:
+            if not self._file_sample_rate:
                 return 0.0
-            now = time.time()
-            if self.state_machine.is_paused() and self._pause_start_time:
-                current_pause = now - self._pause_start_time
-            else:
-                current_pause = 0.0
-            return max(0.0, now - self._start_time - self._total_paused_duration - current_pause)
+            return self.file_sink.total_frames / self._file_sample_rate
 
     def _on_audio_chunk(self, chunk: AudioChunk) -> None:
         """Audio capture callback from driver thread."""
@@ -279,12 +285,12 @@ class RecordingEngine:
             if processed_chunk is None:
                 return  # Dropped by VAD filter
 
-            # 2. Always update time-shift ring buffer
-            self.ring_buffer.push(processed_chunk)
-
-            # 3. If currently recording to disk, stream chunk to file sink
-            if self.state_machine.is_recording():
-                self.file_sink.write_chunk(processed_chunk)
+            # 2. Update the time-shift ring buffer and, if recording, the file — as one
+            #    step, so start_recording's pre-roll snapshot sees each chunk exactly once.
+            with self._write_lock:
+                self.ring_buffer.push(processed_chunk)
+                if self.state_machine.is_recording():
+                    self.file_sink.write_chunk(processed_chunk)
 
             self.event_bus.publish(EventType.CHUNK_PROCESSED, processed_chunk)
 
