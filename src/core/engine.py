@@ -23,6 +23,7 @@ from src.core.state_machine import RecordingStateMachine
 from src.drivers.base import IAudioCaptureDriver, AudioDeviceInfo
 from src.drivers.factory import get_audio_driver
 from src.encoders.audio_file_sink import AudioFileSink, output_channels_for
+from src.encoders.marker_writer import export_cue
 
 
 class RecordingEngine:
@@ -237,6 +238,7 @@ class RecordingEngine:
             duration = self.current_recording_duration
             final_filepath = self.file_sink.close()
             markers_copy = list(self._markers)
+            self._save_markers(final_filepath, markers_copy)
 
             if not keep_buffering:
                 self.driver.stop_capture()
@@ -250,6 +252,19 @@ class RecordingEngine:
 
             self.event_bus.publish(EventType.RECORDING_STOPPED, final_filepath, duration, markers_copy)
             return final_filepath
+
+    def _save_markers(self, audio_path: str, markers: List[Marker]) -> Optional[str]:
+        """Write markers as a CUE sheet next to the recording. Never fails the stop."""
+        if not markers or not audio_path:
+            return None
+        if self._active_config is not None and not self._active_config.save_markers:
+            return None
+        try:
+            return export_cue(markers, audio_path)
+        except Exception as e:
+            print(f"[RecordingEngine] Could not save markers: {e}")
+            self.event_bus.publish(EventType.ERROR_OCCURRED, f"マーカーの保存に失敗しました: {e}", e)
+            return None
 
     def add_marker(self, label: str = "Bookmark", note: str = "") -> Optional[Marker]:
         """Add a timestamp marker during recording."""

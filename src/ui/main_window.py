@@ -37,6 +37,7 @@ from src.ui.components.level_meter import AudioLevelMeter
 from src.ui.components.visualizer import WaveformVisualizer
 from src.ui.components.history_panel import HistoryPanel
 from src.ui.ai_dialog import AIDialog
+from src.encoders.marker_writer import cue_path_for
 
 
 class QtEventBridge(QObject):
@@ -58,6 +59,7 @@ class MainWindow(QMainWindow):
         self.engine = engine or RecordingEngine()
         self.event_bus = EventBus()
         self.bridge = QtEventBridge()
+        self._marker_count = 0
 
         self.setWindowTitle("🎙️ System Audio Recorder - Silicon Valley Edition")
         self.resize(750, 720)
@@ -262,6 +264,7 @@ class MainWindow(QMainWindow):
         if not self.engine.state_machine.is_recording():
             config = self._get_current_config()
             include_shift = self.timeshift_check.isChecked()
+            self._marker_count = 0
             self.engine.start_recording(config, include_time_shift=include_shift)
 
     def _toggle_pause(self):
@@ -274,9 +277,11 @@ class MainWindow(QMainWindow):
         self.engine.stop_recording(keep_buffering=True)
 
     def _add_marker(self):
-        marker = self.engine.add_marker(label="Bookmark")
+        # Numbered labels so tracks are distinguishable in the saved .cue sheet
+        marker = self.engine.add_marker(label=f"Marker {self._marker_count + 1}")
         if marker:
-            self.status_label.setText(f"📌 マーカー追加: {marker.timestamp:.1f}s")
+            self._marker_count += 1
+            self.status_label.setText(f"📌 {marker.label}: {marker.timestamp:.1f}s")
 
     def _on_state_changed(self, old_state: RecordingState, new_state: RecordingState):
         if new_state == RecordingState.RECORDING:
@@ -305,6 +310,10 @@ class MainWindow(QMainWindow):
 
     def _on_recording_stopped(self, filepath: str, duration: float, markers: list):
         self.history_panel.add_recording(filepath, duration)
+        if markers and os.path.exists(cue_path_for(filepath)):
+            self.status_label.setText(
+                f"📌 マーカー {len(markers)} 件を保存しました: {os.path.basename(cue_path_for(filepath))}"
+            )
 
     def _on_error(self, err_msg: str):
         QMessageBox.critical(self, "エラー", f"録音エラーが発生しました:\n{err_msg}")
