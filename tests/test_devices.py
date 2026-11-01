@@ -114,6 +114,83 @@ def test_wasapi_default_flag_points_at_default_loopback(fake_wasapi):
     assert [d.is_default for d in fake_wasapi.get_output_devices()] == [True, False]
 
 
+# --- 2b. Silence gaps in WASAPI loopback ------------------------------------------------
+
+class _FakeLoopbackStream:
+    """
+    Behaves like a WASAPI loopback stream: frames accrue in real time only inside the
+    `playing` windows (seconds since creation); outside them nothing is delivered.
+    """
+
+    def __init__(self, sample_rate, channels, playing):
+        self.rate, self.channels, self.playing = sample_rate, channels, playing
+        self.t0 = time.monotonic()
+        self.consumed = 0
+
+    def _produced(self):
+        now = time.monotonic() - self.t0
+        return int(sum(max(0.0, min(now, end) - start) for start, end in self.playing) * self.rate)
+
+    def is_active(self):
+        return True
+
+    def get_read_available(self):
+        return self._produced() - self.consumed
+
+    def read(self, frames, exception_on_overflow=False):
+        self.consumed += frames
+        return np.full((frames, self.channels), 0.5, dtype=np.float32).tobytes()
+
+
+def _run_worker(playing, duration, rate=48000, channels=2):
+    if not wasapi_driver.HAS_PYAUDIOWPATCH:
+        pytest.skip("pyaudiowpatch not installed")
+    import threading
+    from src.core.models import AudioFormat
+
+    driver = wasapi_driver.WasapiLoopbackDriver()
+    driver._stream = _FakeLoopbackStream(rate, channels, playing)
+    driver._current_format = AudioFormat(sample_rate=rate, channels=channels)
+    chunks = []
+    worker = threading.Thread(target=driver._capture_worker, args=(chunks.append, 1024, channels, rate))
+    worker.start()
+    time.sleep(duration)
+    driver._stop_event.set()
+    worker.join(timeout=2)
+    driver._stream = None
+    return chunks
+
+
+def test_wasapi_fills_pure_silence_in_real_time():
+    """Nothing playing for 1s must still yield ~1s of (silent) audio, not 0s."""
+    chunks = _run_worker(playing=[], duration=1.0)
+    total = sum(c.num_frames for c in chunks) / 48000
+    assert 0.8 <= total <= 1.05
+    assert all(c.is_silent and not c.data.any() for c in chunks)
+
+
+def test_wasapi_keeps_timeline_across_silence_gap():
+    """Audio 0-0.3s, silence, audio 0.8-1.1s: the second burst must start ~0.8s in."""
+    chunks = _run_worker(playing=[(0.0, 0.3), (0.8, 1.1)], duration=1.3)
+    position, starts = 0, []
+    prev_loud = False
+    for c in chunks:
+        loud = bool(c.data.any())
+        if loud and not prev_loud:
+            starts.append(position / 48000)
+        prev_loud = loud
+        position += c.num_frames
+    assert len(starts) == 2
+    assert starts[0] < 0.05
+    assert 0.7 <= starts[1] <= 0.9
+    assert 1.0 <= position / 48000 <= 1.35
+
+
+def test_wasapi_inserts_no_silence_while_audio_flows():
+    chunks = _run_worker(playing=[(0.0, 5.0)], duration=0.6)
+    assert chunks and all(c.data.any() for c in chunks)
+
+
 # --- 3. Device-native format ---------------------------------------------------------------
 
 def test_mix_to_channels_51_keeps_centre_and_drops_lfe():

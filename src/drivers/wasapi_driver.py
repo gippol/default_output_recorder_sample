@@ -45,6 +45,8 @@ class WasapiLoopbackDriver(IAudioCaptureDriver):
         return self._pa
 
     _LOOPBACK_SUFFIX = " [Loopback]"
+    # How long the loopback stream may deliver nothing before the gap is filled with silence.
+    SILENCE_GAP_SECONDS = 0.1
 
     def _display_name(self, raw_name: str) -> str:
         """
@@ -181,16 +183,40 @@ class WasapiLoopbackDriver(IAudioCaptureDriver):
     ) -> None:
         stream = self._stream
         audio_format = self._current_format
+        silence = np.zeros((frames_per_buffer, channels), dtype=np.float32)
+
+        # Stream clock: WASAPI loopback delivers *nothing* while no app is playing, so
+        # without help every silent stretch would vanish from the recording (a 10 min file
+        # could end up 3 min long) and the meters would freeze. We track how many frames
+        # have been emitted versus how many wall-clock time says should exist, and pad
+        # with silence only once the stream has been starved for SILENCE_GAP_SECONDS.
+        # While data is flowing nothing is inserted, so device/system clock drift can
+        # never inject dropouts into real audio.
+        stream_start = time.monotonic()
+        last_data_time = stream_start
+        frames_emitted = 0
+
         while not self._stop_event.is_set():
             try:
                 if not stream or not stream.is_active():
                     time.sleep(0.01)
                     continue
 
-                # WASAPI loopback delivers no packets while nothing is playing, so a plain
-                # read() can block forever. That made stop_capture() time out and close the
-                # stream under a pending read -> access violation. Only read what is ready.
+                # Only read what is ready: a plain read() blocks forever during silence,
+                # which made stop_capture() close the stream under a pending read (crash).
                 if stream.get_read_available() < frames_per_buffer:
+                    now = time.monotonic()
+                    if now - last_data_time >= self.SILENCE_GAP_SECONDS:
+                        frames_due = int((now - stream_start) * sample_rate) - frames_emitted
+                        while frames_due >= frames_per_buffer and not self._stop_event.is_set():
+                            callback(AudioChunk(
+                                data=silence.copy(),
+                                timestamp=time.time(),
+                                format=audio_format,
+                                is_silent=True,
+                            ))
+                            frames_emitted += frames_per_buffer
+                            frames_due -= frames_per_buffer
                     time.sleep(0.005)
                     continue
 
@@ -212,6 +238,8 @@ class WasapiLoopbackDriver(IAudioCaptureDriver):
                     format=audio_format
                 )
 
+                frames_emitted += len(audio_np)
+                last_data_time = time.monotonic()
                 callback(chunk)
 
             except Exception as e:
