@@ -152,7 +152,7 @@ def _run_worker(playing, duration, rate=48000, channels=2):
     driver._stream = _FakeLoopbackStream(rate, channels, playing)
     driver._current_format = AudioFormat(sample_rate=rate, channels=channels)
     chunks = []
-    worker = threading.Thread(target=driver._capture_worker, args=(chunks.append, 1024, channels, rate))
+    worker = threading.Thread(target=driver._capture_worker, args=(chunks.append,))
     worker.start()
     time.sleep(duration)
     driver._stop_event.set()

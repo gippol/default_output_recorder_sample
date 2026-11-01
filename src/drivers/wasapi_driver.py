@@ -5,10 +5,11 @@ Captures system audio / speaker output directly with zero external drivers.
 
 import threading
 import time
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 import numpy as np
+from src.core.dsp import LinearResampler, mix_to_channels
 from src.core.models import AudioChunk, AudioFormat
-from src.drivers.base import IAudioCaptureDriver, AudioDeviceInfo
+from src.drivers.base import AudioDeviceInfo, DeviceStatus, IAudioCaptureDriver
 
 try:
     import pyaudiowpatch as pyaudio
@@ -21,32 +22,70 @@ except ImportError:
         HAS_PYAUDIOWPATCH = False
 
 
+def _match_channels(data: np.ndarray, channels: int) -> np.ndarray:
+    """Convert a block to `channels` channels (downmix to mono/stereo, else pad/truncate)."""
+    if data.shape[1] == channels:
+        return data
+    if channels in (1, 2):
+        return mix_to_channels(data, channels)
+    out = np.zeros((len(data), channels), dtype=np.float32)
+    n = min(channels, data.shape[1])
+    out[:, :n] = data[:, :n]
+    return out
+
+
 class WasapiLoopbackDriver(IAudioCaptureDriver):
     """
     High-fidelity Windows 11 WASAPI Loopback Driver.
     Captures speaker/headphone output streams directly from Windows Audio Engine.
+
+    Resilience:
+    - Silence: WASAPI loopback delivers nothing while no app plays; the gap is padded
+      with silence so recordings stay in real time.
+    - Device loss (headphones unplugged, Bluetooth dropped): capture keeps padding
+      silence, retries once per RECONNECT_INTERVAL_SECONDS, and resumes on the same
+      device or, if it is gone, on the current default output. The output format stays
+      the one capture started with (reconnected audio is resampled/remixed), so a
+      recording in progress never changes format mid-file.
     """
 
+    _LOOPBACK_SUFFIX = " [Loopback]"
+    # How long the loopback stream may deliver nothing before the gap is filled with silence.
+    SILENCE_GAP_SECONDS = 0.1
+    # How often to try reopening a lost capture device.
+    RECONNECT_INTERVAL_SECONDS = 1.0
+    FRAMES_PER_BUFFER = 1024
+
     def __init__(self):
-        self._pa: Optional[pyaudio.PyAudio] = None
+        self._pa: Optional["pyaudio.PyAudio"] = None
+        # Guards self._pa: the capture thread replaces it on reconnect while the UI thread
+        # may be enumerating devices.
+        self._pa_lock = threading.RLock()
         self._stream = None
         self._is_capturing = False
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._current_format: Optional[AudioFormat] = None
+        self._device: Optional[AudioDeviceInfo] = None
 
-    def _get_pyaudio(self) -> pyaudio.PyAudio:
+    # ------------------------------------------------------------------ PyAudio access
+
+    def _create_pyaudio(self) -> "pyaudio.PyAudio":
+        """Create a PyAudio instance. A fresh one re-enumerates devices (PortAudio caches
+        the device list at initialisation, so reconnecting needs a new instance)."""
+        return pyaudio.PyAudio()
+
+    def _get_pyaudio(self) -> "pyaudio.PyAudio":
         if not HAS_PYAUDIOWPATCH:
             raise RuntimeError(
                 "pyaudiowpatch is not installed. Please install via 'pip install pyaudiowpatch'."
             )
-        if self._pa is None:
-            self._pa = pyaudio.PyAudio()
-        return self._pa
+        with self._pa_lock:
+            if self._pa is None:
+                self._pa = self._create_pyaudio()
+            return self._pa
 
-    _LOOPBACK_SUFFIX = " [Loopback]"
-    # How long the loopback stream may deliver nothing before the gap is filled with silence.
-    SILENCE_GAP_SECONDS = 0.1
+    # ------------------------------------------------------------------ Device listing
 
     def _display_name(self, raw_name: str) -> str:
         """
@@ -80,18 +119,10 @@ class WasapiLoopbackDriver(IAudioCaptureDriver):
                 print(f"[WasapiDriver] Warning: Could not query default WASAPI loopback: {e}")
         return None
 
-    def get_output_devices(self) -> List[AudioDeviceInfo]:
-        pa = self._get_pyaudio()
-
-        try:
-            wasapi_info = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
-        except Exception:
-            return []
-
+    def _wasapi_devices(self, pa) -> Tuple[List[dict], List[dict], int]:
+        """(loopback devices, plain output devices, default output index) for WASAPI."""
+        wasapi_info = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
         wasapi_index = wasapi_info["index"]
-        default_output_idx = wasapi_info.get("defaultOutputDevice", -1)
-        default_loopback_idx = self._default_loopback_index(pa)
-
         loopbacks: List[dict] = []
         outputs: List[dict] = []
         for i in range(pa.get_device_count()):
@@ -102,6 +133,16 @@ class WasapiLoopbackDriver(IAudioCaptureDriver):
                 loopbacks.append(dev)
             elif dev.get("maxOutputChannels", 0) > 0:
                 outputs.append(dev)
+        return loopbacks, outputs, wasapi_info.get("defaultOutputDevice", -1)
+
+    def get_output_devices(self) -> List[AudioDeviceInfo]:
+        with self._pa_lock:
+            pa = self._get_pyaudio()
+            try:
+                loopbacks, outputs, default_output_idx = self._wasapi_devices(pa)
+            except Exception:
+                return []
+            default_loopback_idx = self._default_loopback_index(pa)
 
         # PyAudioWPatch exposes one loopback device per output device. Listing only those
         # avoids every speaker appearing twice. Plain PyAudio has no loopback devices, so
@@ -115,137 +156,229 @@ class WasapiLoopbackDriver(IAudioCaptureDriver):
         default = next((d for d in devices if d.is_default), None)
         return default or (devices[0] if devices else None)
 
+    def _resolve_dev_info(self, pa, device: AudioDeviceInfo) -> Optional[dict]:
+        """
+        Find the loopback device dict for `device` in `pa`. The index is tried first, but
+        the name decides: indices change whenever PortAudio is re-initialised (e.g. after a
+        reconnect), so a stale index must not silently select a different device.
+        """
+        loopbacks, outputs, _ = self._wasapi_devices(pa)
+        candidates = loopbacks or outputs
+        by_index = next((d for d in candidates if str(d["index"]) == str(device.id)), None)
+        if by_index is not None and self._display_name(by_index["name"]) == device.name:
+            return by_index
+        by_name = next((d for d in candidates if self._display_name(d["name"]) == device.name), None)
+        if by_name is not None:
+            return by_name
+        # An output (non-loopback) entry was passed: use its loopback counterpart
+        if by_index is not None and not by_index.get("isLoopbackDevice", False):
+            expected = by_index["name"] + self._LOOPBACK_SUFFIX
+            return next((d for d in loopbacks if d["name"] == expected), by_index)
+        return None
+
+    def _open_stream(self, pa, dev_info: dict):
+        """
+        Open a loopback stream. WASAPI loopback (shared mode) only works at the device's
+        mix format, so the native rate/channels are always used.
+        """
+        sample_rate = int(dev_info.get("defaultSampleRate", 48000))
+        channels = int(dev_info.get("maxInputChannels", 0)) or int(dev_info.get("maxOutputChannels", 0)) or 2
+        stream = pa.open(
+            format=pyaudio.paFloat32,
+            channels=channels,
+            rate=sample_rate,
+            input=True,
+            input_device_index=dev_info["index"],
+            frames_per_buffer=self.FRAMES_PER_BUFFER,
+        )
+        return stream, AudioFormat(sample_rate=sample_rate, channels=channels)
+
+    # ------------------------------------------------------------------ Capture
+
     def start_capture(
         self,
         device: Optional[AudioDeviceInfo],
         callback: Callable[[AudioChunk], None],
         audio_format: Optional[AudioFormat] = None
     ) -> None:
+        """`audio_format` is ignored: loopback always runs at the device's native format,
+        which is reported via `current_format` and stamped on every chunk."""
         if self._is_capturing:
             return
 
-        pa = self._get_pyaudio()
-        target_device = device or self.get_default_output_device()
-        if not target_device:
-            raise RuntimeError("No suitable audio output device found for loopback capture.")
+        with self._pa_lock:
+            pa = self._get_pyaudio()
+            target = device or self.get_default_output_device()
+            if not target:
+                raise RuntimeError("No suitable audio output device found for loopback capture.")
+            dev_info = self._resolve_dev_info(pa, target)
+            if dev_info is None:
+                raise RuntimeError(f"Audio output device not found: {target.name}")
+            try:
+                stream, native_format = self._open_stream(pa, dev_info)
+            except Exception as e:
+                raise RuntimeError(f"Failed to open WASAPI Loopback stream: {e}") from e
 
-        # Ensure we have the actual loopback device info from PyAudioWPatch
-        dev_info = pa.get_device_info_by_index(int(target_device.id))
-        
-        # If the device is not marked as loopback, find its loopback counterpart
-        if not dev_info.get("isLoopbackDevice", False):
-            expected_name = dev_info["name"] + self._LOOPBACK_SUFFIX
-            for i in range(pa.get_device_count()):
-                d = pa.get_device_info_by_index(i)
-                if d.get("isLoopbackDevice", False) and d["name"] == expected_name:
-                    dev_info = d
-                    break
-
-        # WASAPI loopback (shared mode) only works at the device's mix format, so the stream
-        # is always opened at the native rate/channels. `audio_format` cannot change that;
-        # the real format is reported via `current_format` and stamped on every chunk.
-        sample_rate = int(dev_info.get("defaultSampleRate", 48000))
-        channels = int(dev_info.get("maxInputChannels", 0)) or int(dev_info.get("maxOutputChannels", 0)) or 2
-
-        self._current_format = AudioFormat(sample_rate=sample_rate, channels=channels)
+        self._stream = stream
+        self._device = self._to_device_info(dev_info, target.is_default)
+        self._current_format = native_format
         self._stop_event.clear()
         self._is_capturing = True
 
-        frames_per_buffer = 1024
-
-        try:
-            self._stream = pa.open(
-                format=pyaudio.paFloat32,
-                channels=channels,
-                rate=sample_rate,
-                input=True,
-                input_device_index=dev_info["index"],
-                frames_per_buffer=frames_per_buffer
-            )
-        except Exception as e:
-            self._is_capturing = False
-            raise RuntimeError(f"Failed to open WASAPI Loopback stream: {e}") from e
-
         self._thread = threading.Thread(
             target=self._capture_worker,
-            args=(callback, frames_per_buffer, channels, sample_rate),
+            args=(callback,),
             daemon=True,
             name="WasapiLoopbackWorker"
         )
         self._thread.start()
 
-    def _capture_worker(
-        self,
-        callback: Callable[[AudioChunk], None],
-        frames_per_buffer: int,
-        channels: int,
-        sample_rate: int
-    ) -> None:
-        stream = self._stream
-        audio_format = self._current_format
-        silence = np.zeros((frames_per_buffer, channels), dtype=np.float32)
+    @staticmethod
+    def _close_stream(stream) -> None:
+        try:
+            if stream.is_active():
+                stream.stop_stream()
+        except Exception:
+            pass
+        try:
+            stream.close()
+        except Exception as e:
+            print(f"[WasapiDriver] Warning during stream close: {e}")
 
-        # Stream clock: WASAPI loopback delivers *nothing* while no app is playing, so
-        # without help every silent stretch would vanish from the recording (a 10 min file
-        # could end up 3 min long) and the meters would freeze. We track how many frames
-        # have been emitted versus how many wall-clock time says should exist, and pad
-        # with silence only once the stream has been starved for SILENCE_GAP_SECONDS.
-        # While data is flowing nothing is inserted, so device/system clock drift can
-        # never inject dropouts into real audio.
+    def _reconnect(self):
+        """
+        Try to reopen capture after the device was lost: the same device if it is back,
+        otherwise the current default output. Returns (stream, native_format, device) or
+        None. Runs on the capture thread.
+        """
+        try:
+            new_pa = self._create_pyaudio()
+        except Exception as e:
+            print(f"[WasapiDriver] Reconnect: could not initialise PyAudio: {e}")
+            return None
+
+        try:
+            dev_info = self._resolve_dev_info(new_pa, self._device) if self._device else None
+            default_idx = self._default_loopback_index(new_pa)
+            if dev_info is None and default_idx is not None:
+                dev_info = new_pa.get_device_info_by_index(default_idx)
+            if dev_info is None:
+                new_pa.terminate()
+                return None
+            stream, native_format = self._open_stream(new_pa, dev_info)
+        except Exception as e:
+            print(f"[WasapiDriver] Reconnect attempt failed: {e}")
+            try:
+                new_pa.terminate()
+            except Exception:
+                pass
+            return None
+
+        with self._pa_lock:
+            old_pa, self._pa = self._pa, new_pa
+        if old_pa is not None:
+            try:
+                old_pa.terminate()
+            except Exception:
+                pass
+
+        device = self._to_device_info(dev_info, dev_info["index"] == default_idx)
+        self._device = device
+        self._stream = stream
+        return stream, native_format, device
+
+    def _capture_worker(self, callback: Callable[[AudioChunk], None]) -> None:
+        # Output format is fixed for the whole capture session (the format of the device
+        # capture started on); audio from a reconnected device is converted to it.
+        out_format = self._current_format
+        out_rate, out_channels = out_format.sample_rate, out_format.channels
+        frames_per_buffer = self.FRAMES_PER_BUFFER
+        silence = np.zeros((frames_per_buffer, out_channels), dtype=np.float32)
+
+        stream = self._stream
+        src_format = out_format
+        resampler: Optional[LinearResampler] = None
+
+        # Stream clock: count frames emitted versus frames wall-clock time says should
+        # exist, and pad with silence once the stream has been starved for
+        # SILENCE_GAP_SECONDS (or the device is gone). While data is flowing nothing is
+        # inserted, so device/system clock drift can never inject dropouts into audio.
         stream_start = time.monotonic()
         last_data_time = stream_start
         frames_emitted = 0
+        next_reconnect = 0.0
+
+        def emit(data: np.ndarray, is_silent: bool = False) -> None:
+            nonlocal frames_emitted
+            frames_emitted += len(data)
+            try:
+                callback(AudioChunk(data=data, timestamp=time.time(), format=out_format, is_silent=is_silent))
+            except Exception as e:
+                print(f"[WasapiDriver] Error in capture callback: {e}")
+
+        def pad_silence(now: float) -> None:
+            frames_due = int((now - stream_start) * out_rate) - frames_emitted
+            while frames_due >= frames_per_buffer and not self._stop_event.is_set():
+                emit(silence.copy(), is_silent=True)
+                frames_due -= frames_per_buffer
 
         while not self._stop_event.is_set():
-            try:
-                if not stream or not stream.is_active():
-                    time.sleep(0.01)
-                    continue
+            now = time.monotonic()
 
+            # ---- Device lost: keep the timeline going and retry periodically
+            if stream is None:
+                pad_silence(now)
+                if now >= next_reconnect:
+                    next_reconnect = now + self.RECONNECT_INTERVAL_SECONDS
+                    reopened = self._reconnect()
+                    if reopened is not None:
+                        stream, src_format, device = reopened
+                        resampler = (
+                            LinearResampler(src_format.sample_rate, out_rate)
+                            if src_format.sample_rate != out_rate else None
+                        )
+                        last_data_time = time.monotonic()
+                        print(f"[WasapiDriver] Capture restored on: {device}")
+                        self._notify_status(DeviceStatus.RESTORED, device)
+                time.sleep(0.02)
+                continue
+
+            # ---- Normal capture
+            try:
+                if not stream.is_active():
+                    raise IOError("stream is no longer active")
                 # Only read what is ready: a plain read() blocks forever during silence,
                 # which made stop_capture() close the stream under a pending read (crash).
                 if stream.get_read_available() < frames_per_buffer:
-                    now = time.monotonic()
                     if now - last_data_time >= self.SILENCE_GAP_SECONDS:
-                        frames_due = int((now - stream_start) * sample_rate) - frames_emitted
-                        while frames_due >= frames_per_buffer and not self._stop_event.is_set():
-                            callback(AudioChunk(
-                                data=silence.copy(),
-                                timestamp=time.time(),
-                                format=audio_format,
-                                is_silent=True,
-                            ))
-                            frames_emitted += frames_per_buffer
-                            frames_due -= frames_per_buffer
+                        pad_silence(now)
                     time.sleep(0.005)
                     continue
-
                 raw_data = stream.read(frames_per_buffer, exception_on_overflow=False)
-                if not raw_data:
-                    continue
-
-                # Convert bytes to numpy float32 [-1.0, 1.0]
-                audio_np = np.frombuffer(raw_data, dtype=np.float32)
-                # Reshape to (frames, channels)
-                if len(audio_np) % channels == 0:
-                    audio_np = audio_np.reshape(-1, channels)
-                else:
-                    continue
-
-                chunk = AudioChunk(
-                    data=audio_np,
-                    timestamp=time.time(),
-                    format=audio_format
-                )
-
-                frames_emitted += len(audio_np)
-                last_data_time = time.monotonic()
-                callback(chunk)
-
             except Exception as e:
-                if not self._stop_event.is_set():
-                    print(f"[WasapiDriver] Stream read error: {e}")
-                    time.sleep(0.01)
+                if self._stop_event.is_set():
+                    break
+                print(f"[WasapiDriver] Capture device lost: {e}")
+                self._close_stream(stream)
+                stream = None
+                self._stream = None
+                next_reconnect = now + self.RECONNECT_INTERVAL_SECONDS
+                self._notify_status(DeviceStatus.LOST, self._device)
+                continue
+
+            if not raw_data:
+                continue
+            audio_np = np.frombuffer(raw_data, dtype=np.float32)
+            if len(audio_np) % src_format.channels != 0:
+                continue
+            audio_np = _match_channels(audio_np.reshape(-1, src_format.channels), out_channels)
+            if resampler is not None:
+                audio_np = resampler.process(audio_np)
+                if len(audio_np) == 0:
+                    continue
+
+            last_data_time = time.monotonic()
+            emit(np.ascontiguousarray(audio_np, dtype=np.float32))
 
     def stop_capture(self) -> None:
         if not self._is_capturing:
@@ -261,14 +394,8 @@ class WasapiLoopbackDriver(IAudioCaptureDriver):
             print("[WasapiDriver] Warning: capture worker did not stop; leaving stream open.")
             self._stream = None
         elif self._stream:
-            try:
-                if self._stream.is_active():
-                    self._stream.stop_stream()
-                self._stream.close()
-            except Exception as e:
-                print(f"[WasapiDriver] Warning during stream close: {e}")
-            finally:
-                self._stream = None
+            self._close_stream(self._stream)
+            self._stream = None
 
         self._is_capturing = False
         self._current_format = None

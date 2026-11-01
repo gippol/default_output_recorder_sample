@@ -10,55 +10,56 @@ import threading
 from typing import Optional
 import numpy as np
 import soundfile as sf
+from src.core.dsp import mix_to_channels, output_channels_for  # noqa: F401 (re-exported)
 from src.core.models import AudioChunk, AudioFormat, OutputFormat
 from src.encoders.base import IAudioSink
 
 
-_MINUS_3DB = 0.7071
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-def output_channels_for(source_channels: int) -> int:
-    """Files are written as mono (for mono sources) or stereo (everything else)."""
-    return 1 if source_channels == 1 else 2
-
-
-def mix_to_channels(data: np.ndarray, target_channels: int) -> np.ndarray:
+def find_ffmpeg() -> Optional[str]:
     """
-    Convert a (frames, n) block to (frames, target_channels).
-
-    Multichannel sources are downmixed to stereo instead of truncated, so the centre
-    channel (where film/game dialogue lives) is not lost. Channel order follows the
-    Windows WAVE_FORMAT_EXTENSIBLE default layout:
-      3: FL FR FC | 4: FL FR BL BR | 5: FL FR FC BL BR | 6 (5.1): FL FR FC LFE BL BR
-      8 (7.1): FL FR FC LFE BL BR SL SR
-    Centre and surrounds are mixed in at -3 dB; LFE is dropped.
+    Absolute path to ffmpeg: from PATH, else an ffmpeg(.exe) in the project root.
+    pydub only *checks* for ffmpeg and then launches the bare name "ffmpeg", which fails
+    when the binary sits next to main.py but is not on PATH, so callers must set
+    AudioSegment.converter to this path.
     """
-    if data.ndim == 1:
-        data = data[:, np.newaxis]
-    n = data.shape[1]
-    if n == target_channels:
-        return data
-    if target_channels == 1:
-        return data.mean(axis=1, keepdims=True)
-    if n == 1:
-        return np.repeat(data, target_channels, axis=1)
-    if target_channels != 2:
-        raise ValueError(f"Unsupported target channel count: {target_channels}")
+    found = shutil.which("ffmpeg")
+    if found:
+        return os.path.abspath(found)
+    for name in ("ffmpeg.exe", "ffmpeg"):
+        candidate = os.path.join(_PROJECT_ROOT, name)
+        if os.path.isfile(candidate):
+            return candidate
+    return None
 
-    left = data[:, 0].astype(np.float32, copy=True)
-    right = data[:, 1].astype(np.float32, copy=True)
-    if n == 4:
-        surround = [2, 3]
-    else:
-        left += _MINUS_3DB * data[:, 2]
-        right += _MINUS_3DB * data[:, 2]
-        surround = list(range(4 if n >= 6 else 3, n))  # skip LFE at index 3
-    for k, ch in enumerate(surround):
-        if k % 2 == 0:
-            left += _MINUS_3DB * data[:, ch]
-        else:
-            right += _MINUS_3DB * data[:, ch]
-    return np.column_stack([left, right])
+
+# libsndfile command: write RF64, but rewrite the header as plain RIFF/WAVE on close if the
+# file stayed under 4 GB. Not exposed by soundfile's public API.
+_SFC_RF64_AUTO_DOWNGRADE = 0x1210
+
+
+def _open_wav_for_streaming(path: str, audio_format: AudioFormat) -> sf.SoundFile:
+    """
+    Open a 16-bit PCM WAV for streaming writes without the 4 GB RIFF limit (about 6 h at
+    48 kHz/16-bit/stereo, after which plain WAV writes fail). The file is written as RF64
+    and automatically downgraded to an ordinary WAV header on close when it is < 4 GB, so
+    normal-length recordings stay compatible with every player.
+    """
+    f = sf.SoundFile(
+        path,
+        mode="w",
+        samplerate=audio_format.sample_rate,
+        channels=audio_format.channels,
+        subtype="PCM_16",
+        format="RF64",
+    )
+    try:
+        sf._snd.sf_command(f._file, _SFC_RF64_AUTO_DOWNGRADE, sf._ffi.NULL, 1)
+    except Exception as e:  # soundfile internals changed: still correct, just always RF64
+        print(f"[AudioFileSink] Warning: RF64 auto-downgrade unavailable ({e}); writing RF64.")
+    return f
 
 
 class AudioFileSink(IAudioSink):
@@ -78,6 +79,9 @@ class AudioFileSink(IAudioSink):
         self._is_open = False
         self._lock = threading.Lock()
         self._total_frames = 0
+        # Set when the last close() could not encode to the requested format and fell
+        # back to WAV; close() then returns the .wav path that actually exists.
+        self.last_conversion_error: Optional[str] = None
 
     def open(
         self,
@@ -95,20 +99,14 @@ class AudioFileSink(IAudioSink):
             self._audio_format = audio_format
             self._bitrate_kbps = bitrate_kbps
             self._total_frames = 0
+            self.last_conversion_error = None
 
             # Ensure destination directory exists
             os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
 
             # Native soundfile formats: WAV, FLAC, OGG
             if output_format == OutputFormat.WAV:
-                self._sf_file = sf.SoundFile(
-                    filepath,
-                    mode="w",
-                    samplerate=audio_format.sample_rate,
-                    channels=audio_format.channels,
-                    subtype="PCM_16",
-                    format="WAV"
-                )
+                self._sf_file = _open_wav_for_streaming(filepath, audio_format)
                 self._temp_wav_path = None
             elif output_format == OutputFormat.FLAC:
                 self._sf_file = sf.SoundFile(
@@ -133,14 +131,7 @@ class AudioFileSink(IAudioSink):
                 # MP3 / AAC / Opus: Write to temp WAV first, then convert on close
                 temp_fd, self._temp_wav_path = tempfile.mkstemp(suffix=".wav")
                 os.close(temp_fd)
-                self._sf_file = sf.SoundFile(
-                    self._temp_wav_path,
-                    mode="w",
-                    samplerate=audio_format.sample_rate,
-                    channels=audio_format.channels,
-                    subtype="PCM_16",
-                    format="WAV"
-                )
+                self._sf_file = _open_wav_for_streaming(self._temp_wav_path, audio_format)
 
             self._is_open = True
 
@@ -181,7 +172,9 @@ class AudioFileSink(IAudioSink):
             # If compression conversion is needed (MP3, AAC/M4A, Opus)
             if self._temp_wav_path and os.path.exists(self._temp_wav_path):
                 try:
-                    self._convert_temp_wav_to_target(self._temp_wav_path, self._filepath, self._target_format)
+                    final_path = self._convert_temp_wav_to_target(
+                        self._temp_wav_path, self._filepath, self._target_format
+                    )
                 finally:
                     if os.path.exists(self._temp_wav_path):
                         try:
@@ -192,11 +185,20 @@ class AudioFileSink(IAudioSink):
 
             return final_path or ""
 
-    def _convert_temp_wav_to_target(self, src_wav: str, dst_file: str, fmt: OutputFormat) -> None:
-        """Convert temporary WAV file to compressed format using pydub."""
+    def _convert_temp_wav_to_target(self, src_wav: str, dst_file: str, fmt: OutputFormat) -> str:
+        """
+        Convert temporary WAV file to compressed format using pydub.
+        Returns the path actually written: `dst_file`, or a .wav fallback on failure.
+        """
         temp_encoded_path = None
         try:
             from pydub import AudioSegment
+            ffmpeg = find_ffmpeg()
+            if ffmpeg is None:
+                raise RuntimeError(
+                    "ffmpeg が見つかりません。PATH に追加するか、プロジェクト直下に ffmpeg.exe を置いてください。"
+                )
+            AudioSegment.converter = ffmpeg
             audio_seg = AudioSegment.from_wav(src_wav)
 
             # Export to a temporary destination first to avoid leaving empty/corrupt files on failure
@@ -212,12 +214,13 @@ class AudioFileSink(IAudioSink):
                 audio_seg.export(temp_encoded_path, format="opus", bitrate=f"{self._bitrate_kbps}k")
             else:
                 shutil.copy2(src_wav, dst_file)
-                return
+                return dst_file
 
             if os.path.exists(dst_file):
                 os.remove(dst_file)
             shutil.move(temp_encoded_path, dst_file)
             temp_encoded_path = None
+            return dst_file
 
         except Exception as e:
             print(f"[AudioFileSink] Warning: Compression conversion failed ({e}). Saving as WAV fallback.")
@@ -228,6 +231,8 @@ class AudioFileSink(IAudioSink):
                     pass
             fallback_path = os.path.splitext(dst_file)[0] + ".wav"
             shutil.copy2(src_wav, fallback_path)
+            self.last_conversion_error = str(e)
+            return fallback_path
         finally:
             if temp_encoded_path and os.path.exists(temp_encoded_path):
                 try:

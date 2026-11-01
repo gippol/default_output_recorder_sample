@@ -21,6 +21,7 @@ class EventType(Enum):
     MARKER_ADDED = auto()        # (marker: Marker)
     ERROR_OCCURRED = auto()      # (error_message: str, exception: Optional[Exception])
     SUBTITLE_CHUNK = auto()      # (segment: SubtitleSegment)
+    DEVICE_STATUS = auto()       # (status: DeviceStatus.*, device: Optional[AudioDeviceInfo])
 
 
 class EventBus:
