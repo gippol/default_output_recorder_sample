@@ -20,7 +20,7 @@ from src.core.event_bus import EventBus, EventType
 from src.core.ring_buffer import AudioRingBuffer
 from src.core.pipeline import AudioPipeline, PeakMeterFilter, VADFilter, GainNormalizerFilter
 from src.core.state_machine import RecordingStateMachine
-from src.drivers.base import IAudioCaptureDriver, AudioDeviceInfo
+from src.drivers.base import IAudioCaptureDriver, AudioDeviceInfo, DeviceStatus
 from src.drivers.factory import get_audio_driver
 from src.encoders.audio_file_sink import AudioFileSink, output_channels_for
 from src.encoders.marker_writer import export_cue
@@ -55,8 +55,18 @@ class RecordingEngine:
         # Device the driver is currently capturing from (resolved, never None while capturing)
         self._capture_device: Optional[AudioDeviceInfo] = None
 
+        # Device lost / restored notifications from the capture thread
+        self.driver.status_callback = self._on_driver_status
+
         # Build default pipeline
         self._rebuild_pipeline(RecordingConfig(output_dir="."))
+
+    def _on_driver_status(self, status: str, device: Optional[AudioDeviceInfo]) -> None:
+        """Called on the capture thread. Must not take self._lock: switch_device() holds it
+        while joining that thread, so waiting here could deadlock."""
+        if status == DeviceStatus.RESTORED and device is not None:
+            self._capture_device = device  # may be a different device (new default)
+        self.event_bus.publish(EventType.DEVICE_STATUS, status, device)
 
     def _rebuild_pipeline(self, config: RecordingConfig) -> None:
         """Reconstruct the audio filter chain based on configuration."""
@@ -162,7 +172,7 @@ class RecordingEngine:
             time_str = now.strftime("%H%M%S")
             filename = config.filename_template.format(date=date_str, time=time_str)
             ext = config.format.value if hasattr(config.format, "value") else str(config.format)
-            filepath = os.path.join(config.output_dir, f"{filename}.{ext}")
+            filepath = self._unique_filepath(config.output_dir, filename, ext)
             self._current_filepath = filepath
 
             # 1. Make sure we capture from the requested device *before* opening the file,
@@ -237,6 +247,13 @@ class RecordingEngine:
 
             duration = self.current_recording_duration
             final_filepath = self.file_sink.close()
+            if self.file_sink.last_conversion_error:
+                self.event_bus.publish(
+                    EventType.ERROR_OCCURRED,
+                    "圧縮形式への変換に失敗したため、WAV で保存しました:\n"
+                    f"{final_filepath}\n\n原因: {self.file_sink.last_conversion_error}",
+                    None,
+                )
             markers_copy = list(self._markers)
             self._save_markers(final_filepath, markers_copy)
 
@@ -252,6 +269,24 @@ class RecordingEngine:
 
             self.event_bus.publish(EventType.RECORDING_STOPPED, final_filepath, duration, markers_copy)
             return final_filepath
+
+    @staticmethod
+    def _unique_filepath(output_dir: str, stem: str, ext: str) -> str:
+        """
+        Return `<stem>.<ext>`, or `<stem>_2.<ext>`, `<stem>_3.<ext>`, ... so an existing
+        recording is never overwritten (e.g. two recordings started in the same second).
+        Sibling files this recording may create are checked too: the .wav written if
+        compression fails, and the .cue marker sheet.
+        """
+        def taken(candidate_stem: str) -> bool:
+            base = os.path.join(output_dir, candidate_stem)
+            return any(os.path.exists(f"{base}.{e}") for e in {ext, "wav", "cue"})
+
+        candidate, n = stem, 1
+        while taken(candidate):
+            n += 1
+            candidate = f"{stem}_{n}"
+        return os.path.join(output_dir, f"{candidate}.{ext}")
 
     def _save_markers(self, audio_path: str, markers: List[Marker]) -> Optional[str]:
         """Write markers as a CUE sheet next to the recording. Never fails the stop."""

@@ -31,6 +31,7 @@ from src.core.models import (
     RecordingState,
 )
 from src.core.event_bus import EventBus, EventType
+from src.drivers.base import AudioDeviceInfo, DeviceStatus
 from src.core.engine import RecordingEngine
 from src.ui.styles.theme import MODERN_DARK_THEME
 from src.ui.components.level_meter import AudioLevelMeter
@@ -47,6 +48,7 @@ class QtEventBridge(QObject):
     state_changed = Signal(object, object)
     recording_stopped = Signal(str, float, list)
     error_received = Signal(str)
+    device_status = Signal(str, object)
 
 
 class MainWindow(QMainWindow):
@@ -200,6 +202,7 @@ class MainWindow(QMainWindow):
             EventType.STATE_CHANGED: lambda o, n: self._safe_emit(self.bridge.state_changed, o, n),
             EventType.RECORDING_STOPPED: lambda path, dur, markers: self._safe_emit(self.bridge.recording_stopped, path, dur, markers),
             EventType.ERROR_OCCURRED: lambda msg, exc: self._safe_emit(self.bridge.error_received, msg),
+            EventType.DEVICE_STATUS: lambda status, dev: self._safe_emit(self.bridge.device_status, status, dev),
         }
 
         for event_type, handler in self._handlers.items():
@@ -211,6 +214,7 @@ class MainWindow(QMainWindow):
         self.bridge.state_changed.connect(self._on_state_changed)
         self.bridge.recording_stopped.connect(self._on_recording_stopped)
         self.bridge.error_received.connect(self._on_error)
+        self.bridge.device_status.connect(self._on_device_status)
 
     def _safe_emit(self, signal, *args):
         try:
@@ -218,20 +222,37 @@ class MainWindow(QMainWindow):
         except RuntimeError:
             pass
 
-    def _populate_devices(self):
-        self.device_combo.clear()
-        devices = self.engine.get_output_devices()
-        default_dev = self.engine.get_default_device()
+    def _populate_devices(self, select: Optional[AudioDeviceInfo] = None):
+        """Fill the device list and select `select` (by name), else the system default.
+        Signals are blocked so repopulating never triggers a device switch."""
+        self.device_combo.blockSignals(True)
+        try:
+            self.device_combo.clear()
+            devices = self.engine.get_output_devices()
+            target = select or self.engine.get_default_device()
 
-        for d in devices:
-            self.device_combo.addItem(str(d), d)
+            for d in devices:
+                self.device_combo.addItem(str(d), d)
 
-        if default_dev:
-            for idx in range(self.device_combo.count()):
-                d = self.device_combo.itemData(idx)
-                if d and d.id == default_dev.id:
-                    self.device_combo.setCurrentIndex(idx)
-                    break
+            if target:
+                for idx in range(self.device_combo.count()):
+                    d = self.device_combo.itemData(idx)
+                    if d and d.name == target.name:
+                        self.device_combo.setCurrentIndex(idx)
+                        break
+        finally:
+            self.device_combo.blockSignals(False)
+
+    def _on_device_status(self, status: str, device: Optional[AudioDeviceInfo]):
+        if status == DeviceStatus.LOST:
+            self.status_label.setText("⚠ デバイスが切断されました。再接続を待っています（無音で記録を継続中）")
+            self.status_label.setStyleSheet("font-weight: bold; color: #F59E0B; font-size: 13px;")
+        elif status == DeviceStatus.RESTORED:
+            # Device indices change when the driver re-enumerates, so refresh the list.
+            self._populate_devices(select=device)
+            name = device.name if device else "不明なデバイス"
+            self.status_label.setText(f"✅ 録音を再開しました: {name}")
+            self.status_label.setStyleSheet("font-weight: bold; color: #10B981; font-size: 13px;")
 
     def _on_device_changed(self, _index: int):
         device = self.device_combo.currentData()

@@ -25,8 +25,27 @@ class AudioDeviceInfo:
         return f"{self.name} [{self.host_api}]{default_tag}"
 
 
+class DeviceStatus:
+    """Values passed to IAudioCaptureDriver.status_callback."""
+    LOST = "lost"          # capture device disappeared/failed; driver pads with silence
+    RESTORED = "restored"  # capture resumed (same device, or the new default device)
+
+
 class IAudioCaptureDriver(ABC):
     """Abstract interface for OS-level audio loopback capture drivers."""
+
+    # Optional hook: status_callback(status: DeviceStatus.*, device: Optional[AudioDeviceInfo]).
+    # Called from the capture thread when the device is lost or capture is restored.
+    status_callback: Optional[Callable[[str, Optional[AudioDeviceInfo]], None]] = None
+
+    def _notify_status(self, status: str, device: Optional[AudioDeviceInfo] = None) -> None:
+        callback = self.status_callback
+        if callback is None:
+            return
+        try:
+            callback(status, device)
+        except Exception as e:
+            print(f"[{type(self).__name__}] Error in status callback: {e}")
 
     @abstractmethod
     def get_output_devices(self) -> List[AudioDeviceInfo]:
