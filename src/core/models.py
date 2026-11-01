@@ -114,3 +114,4 @@ class RecordingConfig:
     vad_threshold_db: float = -45.0 # Silence threshold in dB
     auto_normalize: bool = False    # Peak/Loudness normalization
     device_id: Optional[str] = None # None = Default Output Device
+    save_markers: bool = True       # Write markers as a .cue sheet next to the recording

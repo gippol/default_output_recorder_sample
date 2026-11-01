@@ -3,6 +3,7 @@ Unit Tests for AI Transcription, Translation, and Subtitle Exporters.
 """
 
 import os
+import time
 import tempfile
 from src.core.models import SubtitleSegment
 from src.ai.subtitle_writer import export_srt, export_vtt, export_markdown
@@ -56,3 +57,46 @@ def test_subtitle_exporters():
             assert "# 📝 録音議事録 & 文字起こし" in content
             assert "テスト音声の要約です。" in content
             assert "こんにちは、世界！" in content
+
+
+def test_ai_dialog_delivers_results_on_gui_thread(monkeypatch):
+    """Regression: the worker thread used to call _on_finished (and touch widgets) directly."""
+    import sys
+    import threading
+    from PySide6.QtCore import QCoreApplication, QThread
+    from PySide6.QtWidgets import QApplication
+    from src.ui import ai_dialog
+
+    app = QApplication.instance() or QApplication(sys.argv)
+
+    class _NoWhisper:
+        def __init__(self, *a, **kw):
+            raise RuntimeError("faster-whisper not installed (test stub)")
+
+    monkeypatch.setattr(ai_dialog, "WhisperTranscriptionEngine", _NoWhisper)
+
+    calls = {}
+    original = ai_dialog.AIDialog._on_finished
+
+    def spy(self, segments):
+        calls["on_gui_thread"] = QThread.currentThread() is app.thread()
+        calls["thread_name"] = threading.current_thread().name
+        original(self, segments)
+
+    monkeypatch.setattr(ai_dialog.AIDialog, "_on_finished", spy)
+
+    dialog = ai_dialog.AIDialog("dummy.wav")
+    dialog.trans_combo.setCurrentIndex(0)  # no translation
+    dialog.start_btn.click()
+
+    deadline = time.monotonic() + 5
+    while "on_gui_thread" not in calls and time.monotonic() < deadline:
+        QCoreApplication.processEvents()
+        time.sleep(0.01)
+
+    assert calls.get("on_gui_thread") is True
+    assert calls["thread_name"] != "AIDialogWorker"
+    assert dialog.progress_bar.value() == 100
+    assert dialog.export_srt_btn.isEnabled()
+    assert "録音" in dialog.result_box.toPlainText()
+    dialog.close()
