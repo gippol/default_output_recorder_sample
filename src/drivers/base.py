@@ -60,3 +60,11 @@ class IAudioCaptureDriver(ABC):
     def is_capturing(self) -> bool:
         """Returns True if the driver is actively capturing audio."""
         pass
+
+    @property
+    def current_format(self) -> Optional[AudioFormat]:
+        """
+        The actual format of the chunks being delivered (device-native rate/channels),
+        or None if not capturing. Sinks must use this, not a requested format.
+        """
+        return None

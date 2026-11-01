@@ -72,8 +72,9 @@ class MainWindow(QMainWindow):
         self.timer.timeout.connect(self._update_timer_display)
         self.timer.start(100)
 
-        # Start background buffering (time-shift pre-recording)
-        self.engine.start_buffering()
+        # Start background buffering (time-shift pre-recording) on the selected device
+        self.engine.start_buffering(device=self.device_combo.currentData())
+        self.device_combo.currentIndexChanged.connect(self._on_device_changed)
 
     def _init_ui(self):
         central = QWidget(self)
@@ -230,6 +231,13 @@ class MainWindow(QMainWindow):
                     self.device_combo.setCurrentIndex(idx)
                     break
 
+    def _on_device_changed(self, _index: int):
+        device = self.device_combo.currentData()
+        try:
+            self.engine.switch_device(device)
+        except Exception as e:
+            QMessageBox.warning(self, "デバイス切り替えエラー", f"録音デバイスを切り替えられませんでした:\n{e}")
+
     def _browse_directory(self):
         dir_path = QFileDialog.getExistingDirectory(self, "保存先フォルダを選択", self.dir_input.text())
         if dir_path:
@@ -275,6 +283,7 @@ class MainWindow(QMainWindow):
             self.status_label.setText("🔴 録音中 (RECORDING)")
             self.status_label.setStyleSheet("font-weight: bold; color: #EF4444; font-size: 13px;")
             self.record_btn.setEnabled(False)
+            self.device_combo.setEnabled(False)
             self.pause_btn.setEnabled(True)
             self.pause_btn.setText("⏸ 一時停止")
             self.stop_btn.setEnabled(True)
@@ -287,6 +296,7 @@ class MainWindow(QMainWindow):
             self.status_label.setText("● 待機中 (IDLE / タイムシフト待機)")
             self.status_label.setStyleSheet("font-weight: bold; color: #10B981; font-size: 13px;")
             self.record_btn.setEnabled(True)
+            self.device_combo.setEnabled(True)
             self.pause_btn.setEnabled(False)
             self.stop_btn.setEnabled(False)
             self.marker_btn.setEnabled(False)

@@ -22,7 +22,7 @@ from src.core.pipeline import AudioPipeline, PeakMeterFilter, VADFilter, GainNor
 from src.core.state_machine import RecordingStateMachine
 from src.drivers.base import IAudioCaptureDriver, AudioDeviceInfo
 from src.drivers.factory import get_audio_driver
-from src.encoders.audio_file_sink import AudioFileSink
+from src.encoders.audio_file_sink import AudioFileSink, output_channels_for
 
 
 class RecordingEngine:
@@ -46,6 +46,8 @@ class RecordingEngine:
         self._total_paused_duration: float = 0.0
         self._lock = threading.RLock()
         self._current_filepath: Optional[str] = None
+        # Device the driver is currently capturing from (resolved, never None while capturing)
+        self._capture_device: Optional[AudioDeviceInfo] = None
 
         # Build default pipeline
         self._rebuild_pipeline(RecordingConfig(output_dir="."))
@@ -73,6 +75,39 @@ class RecordingEngine:
         """Get default loopback device."""
         return self.driver.get_default_output_device()
 
+    @property
+    def capture_device(self) -> Optional[AudioDeviceInfo]:
+        """The device currently being captured, or None when the driver is stopped."""
+        with self._lock:
+            return self._capture_device if self.driver.is_capturing() else None
+
+    @staticmethod
+    def _same_device(a: Optional[AudioDeviceInfo], b: Optional[AudioDeviceInfo]) -> bool:
+        if a is None or b is None:
+            return a is b
+        return str(a.id) == str(b.id)
+
+    def _find_device(self, device_id: Optional[str]) -> Optional[AudioDeviceInfo]:
+        if device_id is None:
+            return None
+        return next((d for d in self.driver.get_output_devices() if str(d.id) == str(device_id)), None)
+
+    def _ensure_capturing(self, device: Optional[AudioDeviceInfo]) -> None:
+        """
+        Make sure the driver captures from `device` (None = system default).
+        If it is capturing from a different device, the stream is reopened and the
+        time-shift buffer is cleared, since its audio came from the old device.
+        """
+        target = device or self.driver.get_default_output_device()
+        if self.driver.is_capturing():
+            if target is None or self._same_device(target, self._capture_device):
+                return
+            self.driver.stop_capture()
+            self.ring_buffer.clear()
+
+        self.driver.start_capture(device=target, callback=self._on_audio_chunk)
+        self._capture_device = target
+
     def start_buffering(self, device: Optional[AudioDeviceInfo] = None, time_shift_seconds: int = 30) -> None:
         """
         Start background audio capture into the RAM ring buffer (Time-Shift Mode).
@@ -85,11 +120,21 @@ class RecordingEngine:
             self.ring_buffer.set_capacity(time_shift_seconds)
             self.ring_buffer.clear()
 
-            if not self.driver.is_capturing():
-                self.driver.start_capture(device=device, callback=self._on_audio_chunk)
+            self._ensure_capturing(device)
 
             if self.state_machine.current_state == RecordingState.IDLE:
                 self.state_machine.transition_to(RecordingState.BUFFERING)
+
+    def switch_device(self, device: Optional[AudioDeviceInfo]) -> None:
+        """
+        Switch the capture device while idle/buffering. Not allowed during recording,
+        because a single file cannot change source format mid-stream.
+        """
+        with self._lock:
+            if self.state_machine.is_recording() or self.state_machine.is_paused():
+                raise RuntimeError("Cannot switch audio device while recording.")
+            if self.driver.is_capturing():
+                self._ensure_capturing(device)
 
     def start_recording(self, config: RecordingConfig, include_time_shift: bool = True) -> str:
         """
@@ -115,12 +160,22 @@ class RecordingEngine:
             filepath = os.path.join(config.output_dir, f"{filename}.{ext}")
             self._current_filepath = filepath
 
+            # 1. Make sure we capture from the requested device *before* opening the file,
+            #    so the file can be created with the device's real format.
+            #    device_id None = keep the current device (or the system default).
+            requested = self._find_device(config.device_id) or self.capture_device
+            self._ensure_capturing(requested)
+
+            # 2. The file must use the format the device actually delivers; writing 44.1kHz
+            #    samples into a 48kHz header would change pitch and speed.
+            source_format = self.driver.current_format or AudioFormat(
+                sample_rate=config.sample_rate, channels=config.channels
+            )
             audio_format = AudioFormat(
-                sample_rate=config.sample_rate,
-                channels=config.channels
+                sample_rate=source_format.sample_rate,
+                channels=output_channels_for(source_format.channels),
             )
 
-            # Open file sink
             fmt_enum = config.format if isinstance(config.format, OutputFormat) else OutputFormat(ext)
             self.file_sink.open(
                 filepath=filepath,
@@ -129,19 +184,11 @@ class RecordingEngine:
                 bitrate_kbps=config.bitrate_kbps
             )
 
-            # Write pre-recorded buffer if enabled
+            # 3. Write pre-recorded buffer if enabled (skip anything at a different rate)
             if include_time_shift and not self.ring_buffer.is_empty:
-                snapshot_chunks = self.ring_buffer.get_snapshot()
-                for ch in snapshot_chunks:
-                    self.file_sink.write_chunk(ch)
-
-            # Ensure hardware capture is running
-            if not self.driver.is_capturing():
-                target_dev = None
-                if config.device_id is not None:
-                    devices = self.driver.get_output_devices()
-                    target_dev = next((d for d in devices if str(d.id) == str(config.device_id)), None)
-                self.driver.start_capture(device=target_dev, callback=self._on_audio_chunk, audio_format=audio_format)
+                for ch in self.ring_buffer.get_snapshot():
+                    if ch.format.sample_rate == audio_format.sample_rate:
+                        self.file_sink.write_chunk(ch)
 
             self.state_machine.transition_to(RecordingState.RECORDING)
             self.event_bus.publish(EventType.RECORDING_STARTED, {
