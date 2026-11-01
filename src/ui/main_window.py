@@ -63,7 +63,7 @@ class MainWindow(QMainWindow):
         self.bridge = QtEventBridge()
         self._marker_count = 0
 
-        self.setWindowTitle("🎙️ System Audio Recorder - Silicon Valley Edition")
+        self.setWindowTitle("🎙️ System Audio Recorder")
         self.resize(750, 720)
         self.setStyleSheet(MODERN_DARK_THEME)
 
