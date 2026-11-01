@@ -44,6 +44,14 @@ class AIDialog(QDialog):
         self.setWindowTitle(f"✨ AI 字幕生成 & 翻訳 - {os.path.basename(audio_filepath)}")
         self.resize(700, 500)
 
+        # Results from the worker thread reach the UI only through these signals. Because
+        # this QObject lives in the GUI thread, emits from the worker are queued and the
+        # slots run on the GUI thread (touching widgets from the worker can crash Qt).
+        self._signals = WorkerSignals()
+        self._signals.progress.connect(self._on_progress)
+        self._signals.finished.connect(self._on_finished)
+        self._signals.error.connect(self._on_error)
+
         self._init_ui()
 
     def _init_ui(self):
@@ -110,20 +118,32 @@ class AIDialog(QDialog):
         self.progress_bar.setValue(0)
         self.result_box.setText("⏳ AI音声認識を実行中...")
 
+        # Read every widget value here, on the GUI thread; the worker must not touch widgets.
         lang_code = "ja" if "ja" in self.lang_combo.currentText() else "en"
+        trans_target = self.trans_combo.currentText()
+        audio_filepath = self.audio_filepath
+        signals = self._signals  # the closure keeps the QObject alive while the worker runs
+
+        def emit(signal, *args):
+            try:
+                signal.emit(*args)
+            except RuntimeError:
+                pass  # dialog (and its signals object) was destroyed while we were working
 
         def worker():
             try:
+                def on_progress(fraction: float):
+                    emit(signals.progress, fraction)
+
                 try:
                     engine = WhisperTranscriptionEngine(model_size="base")
-                    segments = engine.transcribe(self.audio_filepath, language=lang_code)
+                    segments = engine.transcribe(audio_filepath, language=lang_code, progress_callback=on_progress)
                 except Exception as e:
                     print(f"[AIDialog] Whisper not available, using MockEngine: {e}")
                     engine = MockTranscriptionEngine()
-                    segments = engine.transcribe(self.audio_filepath, language=lang_code)
+                    segments = engine.transcribe(audio_filepath, language=lang_code, progress_callback=on_progress)
 
                 # Check translation
-                trans_target = self.trans_combo.currentText()
                 if "English" in trans_target:
                     trans_engine = GeminiTranslationEngine()
                     segments = trans_engine.translate_segments(segments, target_lang="en")
@@ -131,11 +151,14 @@ class AIDialog(QDialog):
                     trans_engine = GeminiTranslationEngine()
                     segments = trans_engine.translate_segments(segments, target_lang="ja")
 
-                self._on_finished(segments)
+                emit(signals.finished, segments)
             except Exception as e:
-                self._on_error(str(e))
+                emit(signals.error, str(e))
 
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=worker, daemon=True, name="AIDialogWorker").start()
+
+    def _on_progress(self, fraction: float):
+        self.progress_bar.setValue(int(max(0.0, min(1.0, fraction)) * 100))
 
     def _on_finished(self, segments: List[SubtitleSegment]):
         self.segments = segments
