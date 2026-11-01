@@ -14,13 +14,20 @@ from src.drivers.base import IAudioCaptureDriver, AudioDeviceInfo
 class MockAudioDriver(IAudioCaptureDriver):
     """Generates continuous test audio stream in a background thread."""
 
-    def __init__(self, frequency: float = 440.0, amplitude: float = 0.5):
+    def __init__(
+        self,
+        frequency: float = 440.0,
+        amplitude: float = 0.5,
+        sample_rate: int = 48000,
+        channels: int = 2,
+    ):
         self.frequency = frequency
         self.amplitude = amplitude
         self._is_capturing = False
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
-        self._format = AudioFormat(sample_rate=48000, channels=2)
+        self._format = AudioFormat(sample_rate=sample_rate, channels=channels)
+        self.capturing_device: Optional[AudioDeviceInfo] = None
 
     def get_output_devices(self) -> List[AudioDeviceInfo]:
         return [
@@ -58,6 +65,7 @@ class MockAudioDriver(IAudioCaptureDriver):
             return
 
         self._format = audio_format or self._format
+        self.capturing_device = device or self.get_default_output_device()
         self._is_capturing = True
         self._stop_event.clear()
         self._thread = threading.Thread(
@@ -81,8 +89,8 @@ class MockAudioDriver(IAudioCaptureDriver):
             t = (np.arange(chunk_size) + phase) / sample_rate
             sine_wave = self.amplitude * np.sin(2.0 * np.pi * self.frequency * t)
             
-            # Stereo: shape (chunk_size, 2)
-            stereo_data = np.column_stack([sine_wave, sine_wave]).astype(np.float32)
+            # Shape: (chunk_size, channels)
+            stereo_data = np.column_stack([sine_wave] * self._format.channels).astype(np.float32)
             phase = (phase + chunk_size) % sample_rate
 
             chunk = AudioChunk(
@@ -108,6 +116,11 @@ class MockAudioDriver(IAudioCaptureDriver):
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=1.0)
         self._is_capturing = False
+        self.capturing_device = None
 
     def is_capturing(self) -> bool:
         return self._is_capturing
+
+    @property
+    def current_format(self) -> Optional[AudioFormat]:
+        return self._format if self._is_capturing else None

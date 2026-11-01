@@ -44,94 +44,76 @@ class WasapiLoopbackDriver(IAudioCaptureDriver):
             self._pa = pyaudio.PyAudio()
         return self._pa
 
-    def _clean_name(self, raw_name: str) -> str:
-        """Fix Shift-JIS / CP932 encoding artifacts from PortAudio on Windows."""
-        try:
-            # If string was incorrectly decoded as utf-8 or latin-1
-            encoded = raw_name.encode("utf-8", errors="ignore")
-            # Try decoding cp932
-            return encoded.decode("cp932")
-        except Exception:
+    _LOOPBACK_SUFFIX = " [Loopback]"
+    # How long the loopback stream may deliver nothing before the gap is filled with silence.
+    SILENCE_GAP_SECONDS = 0.1
+
+    def _display_name(self, raw_name: str) -> str:
+        """
+        PyAudioWPatch already returns correctly decoded Unicode names, so no re-decoding is
+        done here (re-decoding as cp932 used to destroy Japanese names like "ヘッドホン").
+        Only the redundant " [Loopback]" suffix is stripped, since host_api already says so.
+        """
+        if raw_name.endswith(self._LOOPBACK_SUFFIX):
+            return raw_name[: -len(self._LOOPBACK_SUFFIX)]
+        return raw_name
+
+    def _to_device_info(self, dev: dict, is_default: bool) -> AudioDeviceInfo:
+        return AudioDeviceInfo(
+            id=dev["index"],
+            name=self._display_name(dev["name"]),
+            host_api="WASAPI Loopback",
+            is_default=is_default,
+            is_loopback=True,
+            max_channels=max(int(dev.get("maxInputChannels", 0)), int(dev.get("maxOutputChannels", 0)), 1),
+            default_sample_rate=int(dev.get("defaultSampleRate", 48000)),
+        )
+
+    def _default_loopback_index(self, pa) -> Optional[int]:
+        """Index of the loopback device that mirrors the current default output, if any."""
+        if hasattr(pa, "get_default_wasapi_loopback"):
             try:
-                return raw_name.encode("latin-1", errors="ignore").decode("cp932")
-            except Exception:
-                return raw_name
+                default_loopback = pa.get_default_wasapi_loopback()
+                if default_loopback:
+                    return int(default_loopback["index"])
+            except Exception as e:
+                print(f"[WasapiDriver] Warning: Could not query default WASAPI loopback: {e}")
+        return None
 
     def get_output_devices(self) -> List[AudioDeviceInfo]:
         pa = self._get_pyaudio()
-        devices: List[AudioDeviceInfo] = []
 
         try:
             wasapi_info = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
         except Exception:
-            return devices
+            return []
 
         wasapi_index = wasapi_info["index"]
         default_output_idx = wasapi_info.get("defaultOutputDevice", -1)
+        default_loopback_idx = self._default_loopback_index(pa)
 
-        # Iterate all devices on the system
+        loopbacks: List[dict] = []
+        outputs: List[dict] = []
         for i in range(pa.get_device_count()):
             dev = pa.get_device_info_by_index(i)
             if dev["hostApi"] != wasapi_index:
                 continue
+            if dev.get("isLoopbackDevice", False):
+                loopbacks.append(dev)
+            elif dev.get("maxOutputChannels", 0) > 0:
+                outputs.append(dev)
 
-            # In PyAudioWPatch, loopback devices are marked with isLoopbackDevice = True
-            is_loopback = dev.get("isLoopbackDevice", False)
-            # Or standard output devices that can be loopback-captured
-            is_output = dev.get("maxOutputChannels", 0) > 0
-
-            if is_loopback or is_output:
-                is_default = (i == default_output_idx)
-                device_info = AudioDeviceInfo(
-                    id=i,
-                    name=self._clean_name(dev["name"]),
-                    host_api="WASAPI Loopback",
-                    is_default=is_default,
-                    is_loopback=True,
-                    max_channels=max(dev.get("maxInputChannels", 0), dev.get("maxOutputChannels", 0), 2),
-                    default_sample_rate=int(dev.get("defaultSampleRate", 48000))
-                )
-                devices.append(device_info)
-
-        return devices
+        # PyAudioWPatch exposes one loopback device per output device. Listing only those
+        # avoids every speaker appearing twice. Plain PyAudio has no loopback devices, so
+        # fall back to the output devices there.
+        if loopbacks:
+            return [self._to_device_info(d, d["index"] == default_loopback_idx) for d in loopbacks]
+        return [self._to_device_info(d, d["index"] == default_output_idx) for d in outputs]
 
     def get_default_output_device(self) -> Optional[AudioDeviceInfo]:
-        pa = self._get_pyaudio()
-        try:
-            # Try PyAudioWPatch dedicated helper first
-            if hasattr(pa, "get_default_wasapi_loopback"):
-                default_loopback = pa.get_default_wasapi_loopback()
-                if default_loopback:
-                    return AudioDeviceInfo(
-                        id=default_loopback["index"],
-                        name=self._clean_name(default_loopback["name"]),
-                        host_api="WASAPI Loopback",
-                        is_default=True,
-                        is_loopback=True,
-                        max_channels=max(default_loopback.get("maxInputChannels", 2), 2),
-                        default_sample_rate=int(default_loopback.get("defaultSampleRate", 48000))
-                    )
-
-            # Fallback to standard WASAPI default output
-            wasapi_info = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
-            default_out_idx = wasapi_info.get("defaultOutputDevice", -1)
-            if default_out_idx >= 0:
-                dev = pa.get_device_info_by_index(default_out_idx)
-                return AudioDeviceInfo(
-                    id=default_out_idx,
-                    name=self._clean_name(dev["name"]),
-                    host_api="WASAPI Loopback",
-                    is_default=True,
-                    is_loopback=True,
-                    max_channels=max(dev.get("maxOutputChannels", 2), 2),
-                    default_sample_rate=int(dev.get("defaultSampleRate", 48000))
-                )
-        except Exception as e:
-            print(f"[WasapiDriver] Warning: Could not find default WASAPI loopback: {e}")
-
-        # Fallback to first available device
         devices = self.get_output_devices()
-        return devices[0] if devices else None
+        default = next((d for d in devices if d.is_default), None)
+        return default or (devices[0] if devices else None)
 
     def start_capture(
         self,
@@ -152,20 +134,20 @@ class WasapiLoopbackDriver(IAudioCaptureDriver):
         
         # If the device is not marked as loopback, find its loopback counterpart
         if not dev_info.get("isLoopbackDevice", False):
+            expected_name = dev_info["name"] + self._LOOPBACK_SUFFIX
             for i in range(pa.get_device_count()):
                 d = pa.get_device_info_by_index(i)
-                if d.get("isLoopbackDevice", False) and dev_info["name"] in d["name"]:
+                if d.get("isLoopbackDevice", False) and d["name"] == expected_name:
                     dev_info = d
                     break
 
+        # WASAPI loopback (shared mode) only works at the device's mix format, so the stream
+        # is always opened at the native rate/channels. `audio_format` cannot change that;
+        # the real format is reported via `current_format` and stamped on every chunk.
         sample_rate = int(dev_info.get("defaultSampleRate", 48000))
-        channels = int(dev_info.get("maxInputChannels", 2))
-        if channels == 0:
-            channels = int(dev_info.get("maxOutputChannels", 2))
-        channels = max(channels, 2)  # Typically stereo
+        channels = int(dev_info.get("maxInputChannels", 0)) or int(dev_info.get("maxOutputChannels", 0)) or 2
 
-        format_spec = audio_format or AudioFormat(sample_rate=sample_rate, channels=channels)
-        self._current_format = format_spec
+        self._current_format = AudioFormat(sample_rate=sample_rate, channels=channels)
         self._stop_event.clear()
         self._is_capturing = True
 
@@ -199,14 +181,46 @@ class WasapiLoopbackDriver(IAudioCaptureDriver):
         channels: int,
         sample_rate: int
     ) -> None:
+        stream = self._stream
+        audio_format = self._current_format
+        silence = np.zeros((frames_per_buffer, channels), dtype=np.float32)
+
+        # Stream clock: WASAPI loopback delivers *nothing* while no app is playing, so
+        # without help every silent stretch would vanish from the recording (a 10 min file
+        # could end up 3 min long) and the meters would freeze. We track how many frames
+        # have been emitted versus how many wall-clock time says should exist, and pad
+        # with silence only once the stream has been starved for SILENCE_GAP_SECONDS.
+        # While data is flowing nothing is inserted, so device/system clock drift can
+        # never inject dropouts into real audio.
+        stream_start = time.monotonic()
+        last_data_time = stream_start
+        frames_emitted = 0
+
         while not self._stop_event.is_set():
             try:
-                if not self._stream or not self._stream.is_active():
+                if not stream or not stream.is_active():
                     time.sleep(0.01)
                     continue
 
-                # Read raw bytes from WASAPI stream (non-blocking overflow handling)
-                raw_data = self._stream.read(frames_per_buffer, exception_on_overflow=False)
+                # Only read what is ready: a plain read() blocks forever during silence,
+                # which made stop_capture() close the stream under a pending read (crash).
+                if stream.get_read_available() < frames_per_buffer:
+                    now = time.monotonic()
+                    if now - last_data_time >= self.SILENCE_GAP_SECONDS:
+                        frames_due = int((now - stream_start) * sample_rate) - frames_emitted
+                        while frames_due >= frames_per_buffer and not self._stop_event.is_set():
+                            callback(AudioChunk(
+                                data=silence.copy(),
+                                timestamp=time.time(),
+                                format=audio_format,
+                                is_silent=True,
+                            ))
+                            frames_emitted += frames_per_buffer
+                            frames_due -= frames_per_buffer
+                    time.sleep(0.005)
+                    continue
+
+                raw_data = stream.read(frames_per_buffer, exception_on_overflow=False)
                 if not raw_data:
                     continue
 
@@ -221,9 +235,11 @@ class WasapiLoopbackDriver(IAudioCaptureDriver):
                 chunk = AudioChunk(
                     data=audio_np,
                     timestamp=time.time(),
-                    format=self._current_format or AudioFormat(sample_rate=sample_rate, channels=channels)
+                    format=audio_format
                 )
 
+                frames_emitted += len(audio_np)
+                last_data_time = time.monotonic()
                 callback(chunk)
 
             except Exception as e:
@@ -239,7 +255,12 @@ class WasapiLoopbackDriver(IAudioCaptureDriver):
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=1.5)
 
-        if self._stream:
+        if self._thread and self._thread.is_alive():
+            # Never close a stream the worker may still be reading: that crashes the process.
+            # Leaking one stream handle is the lesser evil.
+            print("[WasapiDriver] Warning: capture worker did not stop; leaving stream open.")
+            self._stream = None
+        elif self._stream:
             try:
                 if self._stream.is_active():
                     self._stream.stop_stream()
@@ -250,9 +271,14 @@ class WasapiLoopbackDriver(IAudioCaptureDriver):
                 self._stream = None
 
         self._is_capturing = False
+        self._current_format = None
 
     def is_capturing(self) -> bool:
         return self._is_capturing
+
+    @property
+    def current_format(self) -> Optional[AudioFormat]:
+        return self._current_format if self._is_capturing else None
 
     def __del__(self):
         self.stop_capture()

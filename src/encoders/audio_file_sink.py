@@ -14,6 +14,53 @@ from src.core.models import AudioChunk, AudioFormat, OutputFormat
 from src.encoders.base import IAudioSink
 
 
+_MINUS_3DB = 0.7071
+
+
+def output_channels_for(source_channels: int) -> int:
+    """Files are written as mono (for mono sources) or stereo (everything else)."""
+    return 1 if source_channels == 1 else 2
+
+
+def mix_to_channels(data: np.ndarray, target_channels: int) -> np.ndarray:
+    """
+    Convert a (frames, n) block to (frames, target_channels).
+
+    Multichannel sources are downmixed to stereo instead of truncated, so the centre
+    channel (where film/game dialogue lives) is not lost. Channel order follows the
+    Windows WAVE_FORMAT_EXTENSIBLE default layout:
+      3: FL FR FC | 4: FL FR BL BR | 5: FL FR FC BL BR | 6 (5.1): FL FR FC LFE BL BR
+      8 (7.1): FL FR FC LFE BL BR SL SR
+    Centre and surrounds are mixed in at -3 dB; LFE is dropped.
+    """
+    if data.ndim == 1:
+        data = data[:, np.newaxis]
+    n = data.shape[1]
+    if n == target_channels:
+        return data
+    if target_channels == 1:
+        return data.mean(axis=1, keepdims=True)
+    if n == 1:
+        return np.repeat(data, target_channels, axis=1)
+    if target_channels != 2:
+        raise ValueError(f"Unsupported target channel count: {target_channels}")
+
+    left = data[:, 0].astype(np.float32, copy=True)
+    right = data[:, 1].astype(np.float32, copy=True)
+    if n == 4:
+        surround = [2, 3]
+    else:
+        left += _MINUS_3DB * data[:, 2]
+        right += _MINUS_3DB * data[:, 2]
+        surround = list(range(4 if n >= 6 else 3, n))  # skip LFE at index 3
+    for k, ch in enumerate(surround):
+        if k % 2 == 0:
+            left += _MINUS_3DB * data[:, ch]
+        else:
+            right += _MINUS_3DB * data[:, ch]
+    return np.column_stack([left, right])
+
+
 class AudioFileSink(IAudioSink):
     """
     Writes incoming AudioChunks directly to disk.
@@ -110,15 +157,12 @@ class AudioFileSink(IAudioSink):
             if data.ndim == 1:
                 data = data[:, np.newaxis]
 
-            # Channel matching if needed
             expected_channels = self._audio_format.channels if self._audio_format else 2
-            if data.shape[1] != expected_channels:
-                if data.shape[1] == 1 and expected_channels == 2:
-                    data = np.column_stack([data, data])
-                elif data.shape[1] > expected_channels:
-                    data = data[:, :expected_channels]
+            data = mix_to_channels(data, expected_channels)
 
-            self._sf_file.write(data)
+            # Loopback float data can exceed ±1.0 (and the downmix adds energy); clip so
+            # integer subtypes saturate instead of wrapping around.
+            self._sf_file.write(np.clip(data, -1.0, 1.0))
             self._total_frames += len(data)
 
     def close(self) -> str:
