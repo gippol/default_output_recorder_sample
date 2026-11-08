@@ -18,7 +18,7 @@ class IAudioFilter(ABC):
     def process(self, chunk: AudioChunk) -> Optional[AudioChunk]:
         """
         Process an incoming audio chunk.
-        Return modified AudioChunk, or None if chunk should be dropped (e.g. VAD silence).
+        Return modified AudioChunk, or None if chunk should be dropped (e.g. long silence in SilenceSkipFilter).
         """
         pass
 
@@ -75,12 +75,13 @@ class PeakMeterFilter(IAudioFilter):
 class VADFilter(IAudioFilter):
     """
     Voice Activity Detector (VAD) filter based on energy thresholding.
-    Can mark chunk as silent or optionally drop silence chunks.
+    Marks each chunk as silent or not; it never drops anything itself, so filters
+    after it (e.g. the level meter) still see every chunk. Use SilenceSkipFilter at
+    the end of the chain to actually leave silence out of the recording.
     """
 
-    def __init__(self, threshold_db: float = -45.0, drop_silence: bool = False):
+    def __init__(self, threshold_db: float = -45.0):
         self.threshold_db = threshold_db
-        self.drop_silence = drop_silence
 
     def process(self, chunk: AudioChunk) -> Optional[AudioChunk]:
         data = chunk.data
@@ -91,12 +92,31 @@ class VADFilter(IAudioFilter):
         rms_val = float(np.sqrt(np.mean(data ** 2)))
         rms_db = 20.0 * math.log10(rms_val) if rms_val > 1e-5 else -100.0
 
-        is_silent = rms_db < self.threshold_db
-        chunk.is_silent = is_silent
+        chunk.is_silent = rms_db < self.threshold_db
+        return chunk
 
-        if is_silent and self.drop_silence:
-            return None  # Drop chunk to save disk space
 
+class SilenceSkipFilter(IAudioFilter):
+    """
+    Drops chunks marked silent (by VADFilter) once silence has lasted longer than
+    `hangover_seconds`. Short pauses and the tail of a sound are kept, so speech and
+    music are not chopped at every gap; only the part of a long silence beyond the
+    hangover is left out. Place it last, after the meter.
+    """
+
+    def __init__(self, hangover_seconds: float = 1.0):
+        self.hangover_seconds = max(0.0, hangover_seconds)
+        self._silent_frames = 0  # Continuous silence so far (frames, not float seconds,
+                                 # so the hangover boundary is exact)
+
+    def process(self, chunk: AudioChunk) -> Optional[AudioChunk]:
+        if not chunk.is_silent:
+            self._silent_frames = 0
+            return chunk
+
+        self._silent_frames += chunk.num_frames
+        if self._silent_frames > round(self.hangover_seconds * chunk.format.sample_rate):
+            return None  # Inside a long silence: leave it out of the recording
         return chunk
 
 
