@@ -112,6 +112,7 @@ class RecordingConfig:
     time_shift_seconds: int = 30    # Seconds of pre-buffer to keep
     enable_vad: bool = False        # Auto skip silence
     vad_threshold_db: float = -45.0 # Silence threshold in dB
+    vad_hangover_seconds: float = 1.0  # Silence kept before skipping starts (pauses/tails)
     auto_normalize: bool = False    # Peak/Loudness normalization
     device_id: Optional[str] = None # None = Default Output Device
     save_markers: bool = True       # Write markers as a .cue sheet next to the recording

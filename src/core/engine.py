@@ -18,7 +18,7 @@ from src.core.models import (
 )
 from src.core.event_bus import EventBus, EventType
 from src.core.ring_buffer import AudioRingBuffer
-from src.core.pipeline import AudioPipeline, PeakMeterFilter, VADFilter, GainNormalizerFilter
+from src.core.pipeline import AudioPipeline, PeakMeterFilter, VADFilter, GainNormalizerFilter, SilenceSkipFilter
 from src.core.state_machine import RecordingStateMachine
 from src.drivers.base import IAudioCaptureDriver, AudioDeviceInfo, DeviceStatus
 from src.drivers.factory import get_audio_driver
@@ -72,16 +72,21 @@ class RecordingEngine:
         """Reconstruct the audio filter chain based on configuration."""
         self.pipeline.clear()
 
-        # 1. Voice Activity Detection (if enabled)
+        # 1. Voice Activity Detection (if enabled): only marks chunks as silent
         if config.enable_vad:
-            self.pipeline.add_filter(VADFilter(threshold_db=config.vad_threshold_db, drop_silence=False))
+            self.pipeline.add_filter(VADFilter(threshold_db=config.vad_threshold_db))
 
         # 2. Auto Gain Normalization (if enabled)
         if config.auto_normalize:
             self.pipeline.add_filter(GainNormalizerFilter(target_peak_db=-1.0))
 
-        # 3. Peak/RMS Meter (always active for UI telemetry)
+        # 3. Peak/RMS Meter (always active for UI telemetry). Runs before silence is
+        #    dropped, so the meter keeps falling to silence instead of freezing.
         self.pipeline.add_filter(PeakMeterFilter(emit_event=True))
+
+        # 4. Silence skip (if VAD enabled): leave long silences out of the file
+        if config.enable_vad:
+            self.pipeline.add_filter(SilenceSkipFilter(hangover_seconds=config.vad_hangover_seconds))
 
     def get_output_devices(self) -> List[AudioDeviceInfo]:
         """List available output/loopback devices."""
@@ -333,7 +338,7 @@ class RecordingEngine:
             # 1. Pass chunk through filter pipeline (VAD, Normalizer, PeakMeter)
             processed_chunk = self.pipeline.process(chunk)
             if processed_chunk is None:
-                return  # Dropped by VAD filter
+                return  # Long silence left out by SilenceSkipFilter
 
             # 2. Update the time-shift ring buffer and, if recording, the file — as one
             #    step, so start_recording's pre-roll snapshot sees each chunk exactly once.
