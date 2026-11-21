@@ -63,7 +63,7 @@ class MainWindow(QMainWindow):
         self.bridge = QtEventBridge()
         self._marker_count = 0
 
-        self.setWindowTitle("🎙️ System Audio Recorder")
+        self.setWindowTitle("System Audio Recorder")
         self.resize(750, 720)
         self.setStyleSheet(MODERN_DARK_THEME)
 
@@ -88,17 +88,17 @@ class MainWindow(QMainWindow):
         main_layout.setSpacing(14)
 
         # 1. Device & Settings Section
-        settings_group = QGroupBox("⚙️ 設定 & 入力デバイス (Settings & Device)")
+        settings_group = QGroupBox("設定")
         settings_layout = QGridLayout(settings_group)
         settings_layout.setSpacing(10)
 
         # Device Combo
-        settings_layout.addWidget(QLabel("録音対象 (Audio Output):"), 0, 0)
+        settings_layout.addWidget(QLabel("録音対象"), 0, 0)
         self.device_combo = QComboBox()
         settings_layout.addWidget(self.device_combo, 0, 1, 1, 3)
 
         # Format & Bitrate
-        settings_layout.addWidget(QLabel("保存形式 (Format):"), 1, 0)
+        settings_layout.addWidget(QLabel("保存形式"), 1, 0)
         self.format_combo = QComboBox()
         for fmt in OutputFormat:
             self.format_combo.addItem(fmt.name, fmt)
@@ -107,7 +107,7 @@ class MainWindow(QMainWindow):
 
         settings_layout.addWidget(QLabel("ビットレート:"), 1, 2)
         self.bitrate_combo = QComboBox()
-        self.bitrate_combo.addItems(["128 kbps", "192 kbps", "256 kbps", "320 kbps (最高音質)"])
+        self.bitrate_combo.addItems(["128 kbps", "192 kbps", "256 kbps", "320 kbps"])
         self.bitrate_combo.setCurrentIndex(3)
         settings_layout.addWidget(self.bitrate_combo, 1, 3)
 
@@ -122,11 +122,11 @@ class MainWindow(QMainWindow):
 
         # Checkbox Options (Time-Shift & VAD)
         options_layout = QHBoxLayout()
-        self.timeshift_check = QCheckBox("🕒 タイムシフト録音（直前30秒も含めて保存）")
+        self.timeshift_check = QCheckBox("直前30秒を録音に含める")
         self.timeshift_check.setChecked(True)
         options_layout.addWidget(self.timeshift_check)
 
-        self.vad_check = QCheckBox("✂️ 無音区間の自動スキップ (VAD)")
+        self.vad_check = QCheckBox("無音区間をスキップ")
         self.vad_check.setChecked(False)
         options_layout.addWidget(self.vad_check)
 
@@ -136,20 +136,20 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(settings_group)
 
         # 2. Visualizers & Live Telemetry Section
-        monitor_group = QGroupBox("📊 リアルタイム・オーディオモニター (Live Monitor)")
+        monitor_group = QGroupBox("モニター")
         monitor_layout = QVBoxLayout(monitor_group)
         monitor_layout.setSpacing(10)
 
         # Timer & Status Row
         status_row = QHBoxLayout()
-        self.status_label = QLabel("● 待機中 (IDLE / BUFFERING)")
-        self.status_label.setStyleSheet("font-weight: bold; color: #10B981; font-size: 13px;")
+        self.status_label = QLabel("待機中")
+        self.status_label.setStyleSheet("font-weight: bold; color: #166534; font-size: 13px;")
         status_row.addWidget(self.status_label)
 
         status_row.addStretch()
 
         self.time_label = QLabel("00:00:00")
-        self.time_label.setStyleSheet("font-family: 'Consolas', monospace; font-size: 24px; font-weight: bold; color: #60A5FA;")
+        self.time_label.setStyleSheet("font-family: 'Consolas', monospace; font-size: 24px; font-weight: bold; color: #374151;")
         status_row.addWidget(self.time_label)
         monitor_layout.addLayout(status_row)
 
@@ -167,24 +167,24 @@ class MainWindow(QMainWindow):
         controls_layout = QHBoxLayout()
         controls_layout.setSpacing(12)
 
-        self.record_btn = QPushButton("● 録音開始 (REC)")
+        self.record_btn = QPushButton("録音開始")
         self.record_btn.setObjectName("record_btn")
         self.record_btn.clicked.connect(self._toggle_recording)
         controls_layout.addWidget(self.record_btn)
 
-        self.pause_btn = QPushButton("⏸ 一時停止 (Pause)")
+        self.pause_btn = QPushButton("一時停止")
         self.pause_btn.setObjectName("pause_btn")
         self.pause_btn.setEnabled(False)
         self.pause_btn.clicked.connect(self._toggle_pause)
         controls_layout.addWidget(self.pause_btn)
 
-        self.stop_btn = QPushButton("■ 停止 (STOP)")
+        self.stop_btn = QPushButton("停止")
         self.stop_btn.setObjectName("stop_btn")
         self.stop_btn.setEnabled(False)
         self.stop_btn.clicked.connect(self._stop_recording)
         controls_layout.addWidget(self.stop_btn)
 
-        self.marker_btn = QPushButton("📌 マーカー (Marker)")
+        self.marker_btn = QPushButton("マーカー")
         self.marker_btn.setEnabled(False)
         self.marker_btn.clicked.connect(self._add_marker)
         controls_layout.addWidget(self.marker_btn)
@@ -245,14 +245,14 @@ class MainWindow(QMainWindow):
 
     def _on_device_status(self, status: str, device: Optional[AudioDeviceInfo]):
         if status == DeviceStatus.LOST:
-            self.status_label.setText("⚠ デバイスが切断されました。再接続を待っています（無音で記録を継続中）")
-            self.status_label.setStyleSheet("font-weight: bold; color: #F59E0B; font-size: 13px;")
+            self.status_label.setText("デバイスが切断されました。再接続待ち")
+            self.status_label.setStyleSheet("font-weight: bold; color: #A15C00; font-size: 13px;")
         elif status == DeviceStatus.RESTORED:
             # Device indices change when the driver re-enumerates, so refresh the list.
             self._populate_devices(select=device)
             name = device.name if device else "不明なデバイス"
-            self.status_label.setText(f"✅ 録音を再開しました: {name}")
-            self.status_label.setStyleSheet("font-weight: bold; color: #10B981; font-size: 13px;")
+            self.status_label.setText(f"録音を再開しました: {name}")
+            self.status_label.setStyleSheet("font-weight: bold; color: #166534; font-size: 13px;")
 
     def _on_device_changed(self, _index: int):
         device = self.device_combo.currentData()
@@ -302,25 +302,25 @@ class MainWindow(QMainWindow):
         marker = self.engine.add_marker(label=f"Marker {self._marker_count + 1}")
         if marker:
             self._marker_count += 1
-            self.status_label.setText(f"📌 {marker.label}: {marker.timestamp:.1f}s")
+        self.status_label.setText(f"{marker.label}: {marker.timestamp:.1f}s")
 
     def _on_state_changed(self, old_state: RecordingState, new_state: RecordingState):
         if new_state == RecordingState.RECORDING:
-            self.status_label.setText("🔴 録音中 (RECORDING)")
-            self.status_label.setStyleSheet("font-weight: bold; color: #EF4444; font-size: 13px;")
+            self.status_label.setText("録音中")
+            self.status_label.setStyleSheet("font-weight: bold; color: #C6281D; font-size: 13px;")
             self.record_btn.setEnabled(False)
             self.device_combo.setEnabled(False)
             self.pause_btn.setEnabled(True)
-            self.pause_btn.setText("⏸ 一時停止")
+            self.pause_btn.setText("一時停止")
             self.stop_btn.setEnabled(True)
             self.marker_btn.setEnabled(True)
         elif new_state == RecordingState.PAUSED:
-            self.status_label.setText("⏸ 一時停止中 (PAUSED)")
-            self.status_label.setStyleSheet("font-weight: bold; color: #FBBF24; font-size: 13px;")
-            self.pause_btn.setText("▶ 再開 (Resume)")
+            self.status_label.setText("一時停止中")
+            self.status_label.setStyleSheet("font-weight: bold; color: #8A5A00; font-size: 13px;")
+            self.pause_btn.setText("再開")
         elif new_state in (RecordingState.IDLE, RecordingState.BUFFERING):
-            self.status_label.setText("● 待機中 (IDLE / タイムシフト待機)")
-            self.status_label.setStyleSheet("font-weight: bold; color: #10B981; font-size: 13px;")
+            self.status_label.setText("待機中")
+            self.status_label.setStyleSheet("font-weight: bold; color: #166534; font-size: 13px;")
             self.record_btn.setEnabled(True)
             self.device_combo.setEnabled(True)
             self.pause_btn.setEnabled(False)
@@ -333,7 +333,7 @@ class MainWindow(QMainWindow):
         self.history_panel.add_recording(filepath, duration)
         if markers and os.path.exists(cue_path_for(filepath)):
             self.status_label.setText(
-                f"📌 マーカー {len(markers)} 件を保存しました: {os.path.basename(cue_path_for(filepath))}"
+                f"マーカー {len(markers)} 件を保存しました: {os.path.basename(cue_path_for(filepath))}"
             )
 
     def _on_error(self, err_msg: str):

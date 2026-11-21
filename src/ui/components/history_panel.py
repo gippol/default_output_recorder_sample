@@ -38,8 +38,8 @@ class HistoryPanel(QWidget):
 
         # Header
         header_layout = QHBoxLayout()
-        title = QLabel("📁 録音履歴 (Recent Recordings)")
-        title.setStyleSheet("font-weight: bold; color: #94A3B8; font-size: 12px;")
+        title = QLabel("録音履歴")
+        title.setStyleSheet("font-weight: bold; color: #4B5563; font-size: 12px;")
         header_layout.addWidget(title)
         header_layout.addStretch()
 
@@ -56,16 +56,16 @@ class HistoryPanel(QWidget):
 
         # Action Buttons
         btn_layout = QHBoxLayout()
-        self.play_btn = QPushButton("▶ 再生 (Play)")
+        self.play_btn = QPushButton("再生")
         self.play_btn.clicked.connect(self._play_selected)
         btn_layout.addWidget(self.play_btn)
 
-        self.folder_btn = QPushButton("📂 フォルダを開く")
+        self.folder_btn = QPushButton("フォルダを開く")
         self.folder_btn.clicked.connect(self._open_folder)
         btn_layout.addWidget(self.folder_btn)
 
-        self.ai_btn = QPushButton("✨ AI字幕・翻訳")
-        self.ai_btn.setStyleSheet("background-color: #3B82F6; color: white;")
+        self.ai_btn = QPushButton("AI字幕・翻訳")
+        self.ai_btn.setStyleSheet("background-color: #2563EB; color: white;")
         self.ai_btn.clicked.connect(self._request_ai_transcription)
         btn_layout.addWidget(self.ai_btn)
 
