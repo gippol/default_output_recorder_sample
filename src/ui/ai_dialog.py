@@ -41,7 +41,7 @@ class AIDialog(QDialog):
         self.audio_filepath = audio_filepath
         self.segments: List[SubtitleSegment] = []
 
-        self.setWindowTitle(f"✨ AI 字幕生成 & 翻訳 - {os.path.basename(audio_filepath)}")
+        self.setWindowTitle(f"AI字幕生成・翻訳 - {os.path.basename(audio_filepath)}")
         self.resize(700, 500)
 
         # Results from the worker thread reach the UI only through these signals. Because
@@ -72,8 +72,8 @@ class AIDialog(QDialog):
 
         top_layout.addStretch()
 
-        self.start_btn = QPushButton("🚀 文字起こし開始")
-        self.start_btn.setStyleSheet("background-color: #3B82F6; color: white; font-weight: bold; padding: 6px 16px;")
+        self.start_btn = QPushButton("文字起こし開始")
+        self.start_btn.setStyleSheet("background-color: #2563EB; color: white; font-weight: bold; padding: 6px 16px;")
         self.start_btn.clicked.connect(self._run_transcription)
         top_layout.addWidget(self.start_btn)
         layout.addLayout(top_layout)
@@ -94,17 +94,17 @@ class AIDialog(QDialog):
         export_layout = QHBoxLayout()
         export_layout.addWidget(QLabel("エクスポート:"))
 
-        self.export_srt_btn = QPushButton("📄 SRT字幕保存")
+        self.export_srt_btn = QPushButton("SRT字幕を保存")
         self.export_srt_btn.setEnabled(False)
         self.export_srt_btn.clicked.connect(self._export_srt)
         export_layout.addWidget(self.export_srt_btn)
 
-        self.export_vtt_btn = QPushButton("🌐 WebVTT保存")
+        self.export_vtt_btn = QPushButton("WebVTTを保存")
         self.export_vtt_btn.setEnabled(False)
         self.export_vtt_btn.clicked.connect(self._export_vtt)
         export_layout.addWidget(self.export_vtt_btn)
 
-        self.export_md_btn = QPushButton("📝 Markdown議事録保存")
+        self.export_md_btn = QPushButton("Markdown議事録を保存")
         self.export_md_btn.setEnabled(False)
         self.export_md_btn.clicked.connect(self._export_markdown)
         export_layout.addWidget(self.export_md_btn)
@@ -116,7 +116,7 @@ class AIDialog(QDialog):
         self.start_btn.setEnabled(False)
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
-        self.result_box.setText("⏳ AI音声認識を実行中...")
+        self.result_box.setText("AI音声認識を実行中...")
 
         # Read every widget value here, on the GUI thread; the worker must not touch widgets.
         lang_code = "ja" if "ja" in self.lang_combo.currentText() else "en"
@@ -172,7 +172,7 @@ class AIDialog(QDialog):
         for s in segments:
             line = f"[{s.start_seconds:05.1f}s -> {s.end_seconds:05.1f}s] {s.text}"
             if s.translated_text:
-                line += f"\n  ↪ 🌐 {s.translated_text}"
+                line += f"\n  翻訳: {s.translated_text}"
             lines.append(line)
 
         self.result_box.setText("\n\n".join(lines))
@@ -180,7 +180,7 @@ class AIDialog(QDialog):
     def _on_error(self, err_msg: str):
         self.start_btn.setEnabled(True)
         self.progress_bar.setVisible(False)
-        self.result_box.setText(f"❌ エラーが発生しました:\n{err_msg}")
+        self.result_box.setText(f"エラーが発生しました:\n{err_msg}")
 
     def _export_srt(self):
         default_name = os.path.splitext(self.audio_filepath)[0] + ".srt"
