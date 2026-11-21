@@ -39,7 +39,7 @@ class HistoryPanel(QWidget):
         # Header
         header_layout = QHBoxLayout()
         title = QLabel("録音履歴")
-        title.setStyleSheet("font-weight: bold; color: #4B5563; font-size: 12px;")
+        title.setStyleSheet("font-weight: bold; color: #E6EDF7; font-size: 12px;")
         header_layout.addWidget(title)
         header_layout.addStretch()
 

@@ -143,13 +143,13 @@ class MainWindow(QMainWindow):
         # Timer & Status Row
         status_row = QHBoxLayout()
         self.status_label = QLabel("待機中")
-        self.status_label.setStyleSheet("font-weight: bold; color: #166534; font-size: 13px;")
+        self.status_label.setStyleSheet("font-weight: bold; color: #86EFAC; font-size: 13px;")
         status_row.addWidget(self.status_label)
 
         status_row.addStretch()
 
         self.time_label = QLabel("00:00:00")
-        self.time_label.setStyleSheet("font-family: 'Consolas', monospace; font-size: 24px; font-weight: bold; color: #374151;")
+        self.time_label.setStyleSheet("font-family: 'Consolas', monospace; font-size: 24px; font-weight: bold; color: #FFFFFF;")
         status_row.addWidget(self.time_label)
         monitor_layout.addLayout(status_row)
 
@@ -246,13 +246,13 @@ class MainWindow(QMainWindow):
     def _on_device_status(self, status: str, device: Optional[AudioDeviceInfo]):
         if status == DeviceStatus.LOST:
             self.status_label.setText("デバイスが切断されました。再接続待ち")
-            self.status_label.setStyleSheet("font-weight: bold; color: #A15C00; font-size: 13px;")
+            self.status_label.setStyleSheet("font-weight: bold; color: #FFD166; font-size: 13px;")
         elif status == DeviceStatus.RESTORED:
             # Device indices change when the driver re-enumerates, so refresh the list.
             self._populate_devices(select=device)
             name = device.name if device else "不明なデバイス"
             self.status_label.setText(f"録音を再開しました: {name}")
-            self.status_label.setStyleSheet("font-weight: bold; color: #166534; font-size: 13px;")
+            self.status_label.setStyleSheet("font-weight: bold; color: #86EFAC; font-size: 13px;")
 
     def _on_device_changed(self, _index: int):
         device = self.device_combo.currentData()
@@ -307,7 +307,7 @@ class MainWindow(QMainWindow):
     def _on_state_changed(self, old_state: RecordingState, new_state: RecordingState):
         if new_state == RecordingState.RECORDING:
             self.status_label.setText("録音中")
-            self.status_label.setStyleSheet("font-weight: bold; color: #C6281D; font-size: 13px;")
+            self.status_label.setStyleSheet("font-weight: bold; color: #FF6B60; font-size: 13px;")
             self.record_btn.setEnabled(False)
             self.device_combo.setEnabled(False)
             self.pause_btn.setEnabled(True)
@@ -316,11 +316,11 @@ class MainWindow(QMainWindow):
             self.marker_btn.setEnabled(True)
         elif new_state == RecordingState.PAUSED:
             self.status_label.setText("一時停止中")
-            self.status_label.setStyleSheet("font-weight: bold; color: #8A5A00; font-size: 13px;")
+            self.status_label.setStyleSheet("font-weight: bold; color: #FFD166; font-size: 13px;")
             self.pause_btn.setText("再開")
         elif new_state in (RecordingState.IDLE, RecordingState.BUFFERING):
             self.status_label.setText("待機中")
-            self.status_label.setStyleSheet("font-weight: bold; color: #166534; font-size: 13px;")
+            self.status_label.setStyleSheet("font-weight: bold; color: #86EFAC; font-size: 13px;")
             self.record_btn.setEnabled(True)
             self.device_combo.setEnabled(True)
             self.pause_btn.setEnabled(False)

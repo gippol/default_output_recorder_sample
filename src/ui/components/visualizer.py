@@ -58,10 +58,10 @@ class WaveformVisualizer(QWidget):
         mid_y = height / 2.0
 
         # Background
-        painter.fillRect(0, 0, width, height, QColor("#FFFFFF"))
+        painter.fillRect(0, 0, width, height, QColor("#0E1117"))
 
         # Center reference line
-        painter.setPen(QPen(QColor("#E5E7EB"), 1, Qt.PenStyle.DashLine))
+        painter.setPen(QPen(QColor("#566176"), 1, Qt.PenStyle.DashLine))
         painter.drawLine(0, int(mid_y), width, int(mid_y))
 
         samples = list(self._samples)
@@ -80,5 +80,5 @@ class WaveformVisualizer(QWidget):
             y = mid_y - (s * mid_y * 0.9)
             path.lineTo(QPointF(x, y))
 
-        painter.setPen(QPen(QColor("#2563EB"), 1.5))
+        painter.setPen(QPen(QColor("#60A5FA"), 2.5))
         painter.drawPath(path)

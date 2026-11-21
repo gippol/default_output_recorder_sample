@@ -57,7 +57,7 @@ class AudioLevelMeter(QWidget):
         height = self.height()
 
         # Background
-        painter.fillRect(0, 0, width, height, QColor("#FFFFFF"))
+        painter.fillRect(0, 0, width, height, QColor("#0E1117"))
 
         channel_height = (height - 12) / 2
         labels = ["L", "R"]
@@ -72,7 +72,7 @@ class AudioLevelMeter(QWidget):
             norm_hold = max(0.0, min(1.0, (hold_val - self._min_db) / (self._max_db - self._min_db)))
 
             # Draw Channel Label
-            painter.setPen(QColor("#6B7280"))
+            painter.setPen(QColor("#DDE4EE"))
             painter.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
             painter.drawText(QRectF(4, y_offset, 14, channel_height), Qt.AlignmentFlag.AlignCenter, labels[ch])
 
@@ -81,7 +81,7 @@ class AudioLevelMeter(QWidget):
             bar_rect = QRectF(bar_x, y_offset, bar_w, channel_height)
 
             # Bar Background Track
-            painter.fillRect(bar_rect, QColor("#E5E7EB"))
+            painter.fillRect(bar_rect, QColor("#303640"))
 
             # Gradient Active Bar (Green -> Yellow -> Red)
             if norm_val > 0.001:
@@ -101,13 +101,13 @@ class AudioLevelMeter(QWidget):
                 painter.drawLine(int(hold_x), int(y_offset), int(hold_x), int(y_offset + channel_height))
 
             # Numeric dB Text
-            painter.setPen(QColor("#94A3B8"))
+            painter.setPen(QColor("#DDE4EE"))
             painter.setFont(QFont("Consolas", 8))
             db_text = f"{db_val:5.1f} dB" if db_val > self._min_db + 0.5 else "  -inf dB"
             painter.drawText(QRectF(width - 44, y_offset, 40, channel_height), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, db_text)
 
         # Clipping Indicator Dot
-        clip_color = QColor("#EF4444") if self._is_clipping else QColor("#CBD1D9")
+        clip_color = QColor("#FF6B60") if self._is_clipping else QColor("#566176")
         painter.setBrush(clip_color)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawEllipse(width - 44, 4, 6, 6)
